@@ -47,6 +47,35 @@ Must handle both IPv4 and IPv6, normalizing IPv6 to consistent format."
 
 ---
 
+## When to Use Zeroshot
+
+**Zeroshot requires well-defined tasks with clear acceptance criteria.**
+
+| Scenario | Zeroshot? | Why |
+|----------|-----------|-----|
+| "Add rate limiting with sliding window, per-IP, 429 responses" | ✅ Yes | Clear requirements, validators can verify each one |
+| "Refactor auth to use JWT instead of sessions" | ✅ Yes | Known complexity, defined end state |
+| "Fix the bug where users can't login" | ✅ Yes | Known unknown - need to find cause, but success is clear |
+| "Fix all 2410 linting violations" | ✅ Yes | Long-running batch task, clear completion (0 violations) |
+| "Make the app faster" | ❌ No | Unknown unknowns - need exploration first |
+| "Improve the codebase" | ❌ No | No acceptance criteria to validate |
+| "Figure out why tests are flaky" | ❌ No | Exploratory - use single-agent Claude Code |
+
+**Known unknowns** (implementation details unclear) → Zeroshot handles this. The planner figures it out.
+
+**Unknown unknowns** (don't know what you'll discover) → Use single-agent Claude Code for exploration first, then come back with a well-defined task.
+
+**Long-running batch tasks** → Zeroshot excels here. Run overnight with `-d` (daemon mode):
+- "Fix all 2410 semantic linting violations"
+- "Add TypeScript types to all 47 untyped files"
+- "Migrate all API calls from v1 to v2"
+
+Crash recovery (`zeroshot resume`) means multi-hour tasks survive interruptions.
+
+**Rule of thumb:** If you can't describe what "done" looks like, zeroshot's validators can't verify it.
+
+---
+
 ## Install
 
 **Platforms**: Linux, macOS
