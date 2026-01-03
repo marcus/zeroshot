@@ -677,11 +677,11 @@ Input formats:
               iteration: data.iteration || 0,
             });
           } else if (event === 'PROCESS_SPAWNED') {
-            // Got the PID - update the agent with it
-            const current = statusFooter.agents.get(agentId) || { state: AGENT_STATE.EXECUTING_TASK, iteration: 0 };
+            // PROCESS_SPAWNED = proof of execution. If a process spawned, agent is executing.
+            const current = statusFooter.agents.get(agentId) || { iteration: 0 };
             statusFooter.updateAgent({
               id: agentId,
-              state: current.state,
+              state: AGENT_STATE.EXECUTING_TASK,
               pid: data.pid,
               iteration: current.iteration,
             });
@@ -1319,11 +1319,11 @@ program
                     iteration: data.iteration || 0,
                   });
                 } else if (event === 'PROCESS_SPAWNED') {
-                  // Got the PID - update the agent with it for CPU/memory metrics
-                  const current = statusFooter.agents.get(agentId) || { state: AGENT_STATE.EXECUTING_TASK, iteration: 0 };
+                  // PROCESS_SPAWNED = proof of execution. If a process spawned, agent is executing.
+                  const current = statusFooter.agents.get(agentId) || { iteration: 0 };
                   statusFooter.updateAgent({
                     id: agentId,
-                    state: current.state,
+                    state: AGENT_STATE.EXECUTING_TASK,
                     pid: data.pid,
                     iteration: current.iteration,
                   });
