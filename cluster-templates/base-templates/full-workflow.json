@@ -433,7 +433,7 @@
       "role": "validator",
       "model": "{{validator_model}}",
       "timeout": "{{timeout}}",
-      "condition": "{{validator_count}} >= 5",
+      "condition": "{{complexity}} === 'CRITICAL'",
       "outputFormat": "json",
       "jsonSchema": {
         "type": "object",
@@ -443,10 +443,10 @@
           "proofOfWork": {
             "type": "object",
             "properties": {
-              "serverVerified": { "type": "boolean" },
-              "happyPathVerified": { "type": "boolean" },
-              "edgeCasesTested": { "type": "number" },
-              "failuresFound": { "type": "number" }
+              "projectExecutable": { "type": "boolean", "description": "Could run/build/invoke the project" },
+              "happyPathVerified": { "type": "boolean", "description": "Primary use case works end-to-end" },
+              "edgeCasesTested": { "type": "number", "description": "Number of edge cases tested" },
+              "failuresFound": { "type": "number", "description": "Number of bugs/issues discovered" }
             }
           },
           "failures": {

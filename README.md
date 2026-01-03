@@ -218,7 +218,7 @@ The conductor classifies your task (complexity × type) and picks the right work
                                                   │      │   │ ✓ security (CRIT)    │
                                                   │      │   │ ✓ tester (CRIT)      │
                                                   │      │   │ ✓ adversarial        │
-                                                  │      │   │   (curl + browser)   │
+                                                  │      │   │   (real execution)   │
                                                   │      │   └──────────┬───────────┘
                                                   │      │       REJECT │ ALL OK
                                                   │      └──────────────┘     │
@@ -232,19 +232,19 @@ The conductor classifies your task (complexity × type) and picks the right work
 | ---------------------- | ---------- | ------ | ------------------------------------------------- |
 | Fix typo in README     | TRIVIAL    | 1      | None                                              |
 | Add dark mode toggle   | SIMPLE     | 2      | generic validator                                 |
-| Refactor auth system   | STANDARD   | 5      | requirements, code, adversarial                   |
+| Refactor auth system   | STANDARD   | 4      | requirements, code                                |
 | Implement payment flow | CRITICAL   | 7      | requirements, code, security, tester, adversarial |
 
 ### Model Selection by Complexity
 
-| Complexity | Planner | Worker | Validators | Est. Cost |
-| ---------- | ------- | ------ | ---------- | --------- |
-| TRIVIAL    | -       | haiku  | 0          | ~$0.01    |
-| SIMPLE     | -       | sonnet | 1 (sonnet) | ~$0.10    |
-| STANDARD   | sonnet  | sonnet | 3 (sonnet) | ~$0.50    |
-| CRITICAL   | opus    | sonnet | 5 (sonnet) | ~$2.00    |
+| Complexity | Planner | Worker | Validators |
+| ---------- | ------- | ------ | ---------- |
+| TRIVIAL    | -       | haiku  | 0          |
+| SIMPLE     | -       | sonnet | 1 (sonnet) |
+| STANDARD   | sonnet  | sonnet | 2 (sonnet) |
+| CRITICAL   | opus    | sonnet | 5 (sonnet) |
 
-Set cost ceiling: `zeroshot settings set maxModel sonnet` (prevents opus)
+Set model ceiling: `zeroshot settings set maxModel sonnet` (prevents opus)
 
 ---
 
