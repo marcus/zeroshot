@@ -49,7 +49,7 @@ const {
 const { requirePreflight } = require('../src/preflight');
 const { checkFirstRun } = require('./lib/first-run');
 const { checkForUpdates } = require('./lib/update-checker');
-const { StatusFooter } = require('../src/status-footer');
+const { StatusFooter, AGENT_STATE, ACTIVE_STATES } = require('../src/status-footer');
 
 const program = new Command();
 
@@ -665,20 +665,20 @@ Input formats:
           if (event === 'STARTED') {
             statusFooter.updateAgent({
               id: agentId,
-              state: 'idle',
+              state: AGENT_STATE.IDLE,
               pid: null,
               iteration: data.iteration || 0,
             });
           } else if (event === 'TASK_STARTED') {
             statusFooter.updateAgent({
               id: agentId,
-              state: 'executing',
+              state: AGENT_STATE.EXECUTING_TASK,
               pid: statusFooter.agents.get(agentId)?.pid || null,
               iteration: data.iteration || 0,
             });
           } else if (event === 'PROCESS_SPAWNED') {
             // Got the PID - update the agent with it
-            const current = statusFooter.agents.get(agentId) || { state: 'executing', iteration: 0 };
+            const current = statusFooter.agents.get(agentId) || { state: AGENT_STATE.EXECUTING_TASK, iteration: 0 };
             statusFooter.updateAgent({
               id: agentId,
               state: current.state,
@@ -688,7 +688,7 @@ Input formats:
           } else if (event === 'TASK_COMPLETED' || event === 'TASK_FAILED') {
             statusFooter.updateAgent({
               id: agentId,
-              state: 'idle',
+              state: AGENT_STATE.IDLE,
               pid: null,
               iteration: data.iteration || 0,
             });
@@ -1307,20 +1307,20 @@ program
                 if (event === 'STARTED') {
                   statusFooter.updateAgent({
                     id: agentId,
-                    state: 'idle',
+                    state: AGENT_STATE.IDLE,
                     pid: null,
                     iteration: data.iteration || 0,
                   });
                 } else if (event === 'TASK_STARTED') {
                   statusFooter.updateAgent({
                     id: agentId,
-                    state: 'executing',
+                    state: AGENT_STATE.EXECUTING_TASK,
                     pid: statusFooter.agents.get(agentId)?.pid || null,
                     iteration: data.iteration || 0,
                   });
                 } else if (event === 'PROCESS_SPAWNED') {
                   // Got the PID - update the agent with it for CPU/memory metrics
-                  const current = statusFooter.agents.get(agentId) || { state: 'executing', iteration: 0 };
+                  const current = statusFooter.agents.get(agentId) || { state: AGENT_STATE.EXECUTING_TASK, iteration: 0 };
                   statusFooter.updateAgent({
                     id: agentId,
                     state: current.state,
@@ -1330,7 +1330,7 @@ program
                 } else if (event === 'TASK_COMPLETED' || event === 'TASK_FAILED') {
                   statusFooter.updateAgent({
                     id: agentId,
-                    state: 'idle',
+                    state: AGENT_STATE.IDLE,
                     pid: null,
                     iteration: data.iteration || 0,
                   });
@@ -1727,8 +1727,10 @@ Key bindings:
 
         try {
           const status = orchestrator.getStatus(id);
+          // Agent is "active" if in any working state
+          // Note: currentTaskId may be null briefly between TASK_STARTED and TASK_ID_ASSIGNED
           const activeAgents = status.agents.filter(
-            (a) => a.currentTaskId && a.state === 'executing_task'
+            (a) => ACTIVE_STATES.has(a.state)
           );
 
           if (activeAgents.length === 0) {
@@ -1750,10 +1752,18 @@ Key bindings:
             console.log(chalk.yellow(`\nCluster ${id} - attachable agents:\n`));
             for (const agent of activeAgents) {
               const modelLabel = agent.model ? chalk.dim(` [${agent.model}]`) : '';
-              console.log(
-                `  ${chalk.cyan(agent.id)}${modelLabel} → task ${chalk.green(agent.currentTaskId)}`
-              );
-              console.log(chalk.dim(`    zeroshot attach ${agent.currentTaskId}`));
+              if (agent.currentTaskId) {
+                console.log(
+                  `  ${chalk.cyan(agent.id)}${modelLabel} → task ${chalk.green(agent.currentTaskId)}`
+                );
+                console.log(chalk.dim(`    zeroshot attach ${agent.currentTaskId}`));
+              } else {
+                // Task ID not yet assigned (Claude CLI still starting)
+                console.log(
+                  `  ${chalk.cyan(agent.id)}${modelLabel} → ${chalk.yellow('starting...')}`
+                );
+                console.log(chalk.dim(`    (task ID not yet assigned, try again in a moment)`));
+              }
             }
             console.log(chalk.dim('\nAttach to an agent by running: zeroshot attach <taskId>'));
             return;
@@ -1770,8 +1780,14 @@ Key bindings:
           }
 
           if (!agent.currentTaskId) {
-            console.error(chalk.yellow(`Agent '${options.agent}' is not currently running a task`));
-            console.log(chalk.dim(`State: ${agent.state}`));
+            if (ACTIVE_STATES.has(agent.state)) {
+              // Agent is working but task ID not yet assigned
+              console.error(chalk.yellow(`Agent '${options.agent}' is working (state: ${agent.state}, task ID not yet assigned)`));
+              console.log(chalk.dim('Try again in a moment...'));
+            } else {
+              console.error(chalk.yellow(`Agent '${options.agent}' is not currently running a task`));
+              console.log(chalk.dim(`State: ${agent.state}`));
+            }
             return;
           }
 

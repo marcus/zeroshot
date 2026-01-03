@@ -44,12 +44,23 @@ const COLORS = {
   bgBlack: `${CSI}40m`,
 };
 
+/**
+ * Canonical agent state constants - SINGLE SOURCE OF TRUTH
+ * Use these instead of magic strings throughout the codebase
+ */
+const AGENT_STATE = Object.freeze({
+  IDLE: 'idle',
+  EXECUTING_TASK: 'executing_task',
+  EVALUATING_LOGIC: 'evaluating_logic',
+  BUILDING_CONTEXT: 'building_context',
+});
+
 // Agent states that indicate "active" work (from agent-lifecycle.js)
 // These should show in the footer with metrics
 const ACTIVE_STATES = new Set([
-  'executing_task',    // Actually running claude CLI
-  'evaluating_logic',  // Evaluating trigger conditions
-  'building_context',  // Building context for task
+  AGENT_STATE.EXECUTING_TASK,   // Actually running claude CLI
+  AGENT_STATE.EVALUATING_LOGIC, // Evaluating trigger conditions
+  AGENT_STATE.BUILDING_CONTEXT, // Building context for task
 ]);
 
 /**
@@ -964,4 +975,6 @@ function createStatusFooter(options = {}) {
 module.exports = {
   StatusFooter,
   createStatusFooter,
+  AGENT_STATE,
+  ACTIVE_STATES,
 };
