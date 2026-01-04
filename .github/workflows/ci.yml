@@ -55,14 +55,17 @@ jobs:
         continue-on-error: true
 
   # Cross-platform/version compatibility
-  # NOTE: macOS runners cost 10x Linux minutes - only run on releases
+  # NOTE: macOS runners cost 10x Linux minutes - minimal matrix
   install-matrix:
     needs: check
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        node: [20]
+        include:
+          - os: ubuntu-latest
+            node: 20
+          - os: macos-latest
+            node: 20
 
     runs-on: ${{ matrix.os }}
 
