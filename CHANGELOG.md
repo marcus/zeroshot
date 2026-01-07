@@ -1,3 +1,15 @@
+# [5.2.0](https://github.com/covibes/zeroshot/compare/v5.1.0...v5.2.0) (2026-01-07)
+
+
+### Bug Fixes
+
+* **test:** add retry logic to e2e-claude-command tests ([ed52c86](https://github.com/covibes/zeroshot/commit/ed52c86f86180da02a37616018797acaa58aa764))
+
+
+### Features
+
+* add claudeCommand setting for custom Claude CLI ([#38](https://github.com/covibes/zeroshot/issues/38)) ([6e1a140](https://github.com/covibes/zeroshot/commit/6e1a140e75b2c37d2a071b8afd853656ba5e12f7)), closes [#37](https://github.com/covibes/zeroshot/issues/37)
+
 # [5.1.0](https://github.com/covibes/zeroshot/compare/v5.0.0...v5.1.0) (2026-01-07)
 
 
