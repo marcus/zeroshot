@@ -319,7 +319,23 @@ function runPreflight(options = {}) {
     }
   }
 
-  // 3. Check gh CLI (if required)
+  // 3. Check if running as root (blocks --dangerously-skip-permissions)
+  if (process.getuid && process.getuid() === 0) {
+    errors.push(
+      formatError(
+        'Running as root',
+        'Claude CLI refuses --dangerously-skip-permissions flag when running as root (UID 0)',
+        [
+          'Run as non-root user in Docker: docker run --user 1000:1000 ...',
+          'Or create non-root user: adduser testuser && su - testuser',
+          'Or use existing node user: docker run --user node ...',
+          'Security: Claude CLI blocks this flag as root to prevent privilege escalation',
+        ]
+      )
+    );
+  }
+
+  // 4. Check gh CLI (if required)
   if (options.requireGh) {
     const gh = checkGhAuth();
     if (!gh.installed) {
@@ -348,7 +364,7 @@ function runPreflight(options = {}) {
     }
   }
 
-  // 4. Check Docker (if required)
+  // 5. Check Docker (if required)
   if (options.requireDocker) {
     const docker = checkDocker();
     if (!docker.available) {
@@ -367,7 +383,7 @@ function runPreflight(options = {}) {
     }
   }
 
-  // 5. Check git repo (if required for worktree isolation)
+  // 6. Check git repo (if required for worktree isolation)
   if (options.requireGit) {
     let isGitRepo = false;
     try {
