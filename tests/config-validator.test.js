@@ -2687,6 +2687,48 @@ describe('Config Validator', function () {
         const roleErrors = result.errors.filter((e) => e.includes('[Gap 15]'));
         assert.strictEqual(roleErrors.length, 0);
       });
+
+      it('should pass when logic has zero-length fallback (git-pusher pattern)', function () {
+        // This tests the git-pusher agent pattern that checks validators.length === 0
+        // and returns early if no validators exist (valid TRIVIAL/SIMPLE workflow)
+        const config = {
+          agents: [
+            {
+              id: 'git-pusher',
+              role: 'completion-detector',
+              triggers: [
+                {
+                  topic: 'VALIDATION_RESULT',
+                  logic: {
+                    // This is the exact pattern from git-pusher-agent.json
+                    // It correctly handles zero validators with an early return
+                    script:
+                      "const validators = cluster.getAgentsByRole('validator'); if (validators.length === 0) return true; return validators.length > 0;",
+                  },
+                },
+              ],
+              hooks: {
+                onComplete: {
+                  action: 'publish_message',
+                  config: { topic: 'PR_CREATED', content: {} },
+                },
+              },
+            },
+            {
+              id: 'completion',
+              role: 'orchestrator',
+              triggers: [{ topic: 'PR_CREATED', action: 'stop_cluster' }],
+            },
+          ],
+        };
+        const result = validateConfig(config);
+        const roleErrors = result.errors.filter((e) => e.includes('[Gap 15]'));
+        assert.strictEqual(
+          roleErrors.length,
+          0,
+          'Should not error when logic has zero-length fallback pattern'
+        );
+      });
     });
   });
 

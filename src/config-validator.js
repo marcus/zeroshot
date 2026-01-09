@@ -1400,7 +1400,13 @@ function validateConfigSemantics(config) {
                 /allResponded/.test(script) || // Waiting for responses
                 /hasConsensus/.test(script); // Consensus check
 
-              if (isCritical) {
+              // Check if logic has a valid "zero length" fallback pattern
+              // e.g., "if (validators.length === 0) return true" handles missing role gracefully
+              const hasZeroLengthFallback =
+                /\.length\s*===?\s*0\s*\)\s*return/.test(script) || // length === 0) return
+                /\.length\s*[<]=\s*0/.test(script); // length <= 0 or length < 1
+
+              if (isCritical && !hasZeroLengthFallback) {
                 errors.push(
                   `[Gap 15] ${prefix}: Logic references role '${role}' which doesn't exist. ` +
                     `This will cause logic to fail. Fix: Add agent with role '${role}' or update logic.`
