@@ -219,6 +219,20 @@ Clusters survive crashes. Resume: `zeroshot resume <id>`.
 Bash subprocess output not streamed: Claude CLI returns `tool_result` after subprocess completes.
 Long scripts show no output until done.
 
+### Kubernetes / Network Storage (SQLite Ledger)
+
+Zeroshot’s message ledger is SQLite (`~/.zeroshot/<id>.db`). On Kubernetes, putting this on a
+network filesystem (EFS/NFS/CephFS) can cause severe latency and lock contention.
+
+Mitigations (env vars):
+
+- `ZEROSHOT_SQLITE_JOURNAL_MODE=DELETE` (or `TRUNCATE`) for network filesystems that don’t like WAL
+- `ZEROSHOT_SQLITE_WAL_AUTOCHECKPOINT_PAGES=1000` (default) to avoid per-write checkpoint storms
+- `ZEROSHOT_SQLITE_BUSY_TIMEOUT_MS=5000` (default) to reduce `SQLITE_BUSY` flakiness under contention
+
+Operational rule: don’t run multiple pods against the same `~/.zeroshot` volume unless you
+really know what you’re doing—SQLite is not a multi-writer, multi-node database.
+
 ## Fixed Bugs (Reference)
 
 ### Template Agent CWD Injection (2026-01-03)
