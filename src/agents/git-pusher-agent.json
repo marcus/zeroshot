@@ -1,7 +1,7 @@
 {
   "id": "git-pusher",
   "role": "completion-detector",
-  "model": "sonnet",
+  "modelLevel": "level2",
   "triggers": [
     {
       "topic": "VALIDATION_RESULT",
