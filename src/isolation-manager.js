@@ -281,146 +281,7 @@ class IsolationManager {
           try {
             console.log(`[IsolationManager] Checking for package.json in ${workDir}...`);
             if (fs.existsSync(path.join(workDir, 'package.json'))) {
-              // Check if node_modules already exists in container (pre-baked or previous run)
-              const checkResult = await this.execInContainer(
-                clusterId,
-                [
-                  'sh',
-                  '-c',
-                  'test -d node_modules && test -f node_modules/.package-lock.json && echo "exists"',
-                ],
-                {}
-              );
-
-              if (checkResult.code === 0 && checkResult.stdout.trim() === 'exists') {
-                console.log(
-                  `[IsolationManager] ✓ Dependencies already installed (skipping npm install)`
-                );
-              } else {
-                // Check if npm is available in container
-                const npmCheck = await this.execInContainer(clusterId, ['which', 'npm'], {});
-                if (npmCheck.code !== 0) {
-                  console.log(
-                    `[IsolationManager] npm not available in container, skipping dependency install`
-                  );
-                } else {
-                  // Issue #20: Try to use pre-baked dependencies first
-                  // Check if pre-baked deps exist and can satisfy project requirements
-                  const preBakeCheck = await this.execInContainer(
-                    clusterId,
-                    ['sh', '-c', 'test -d /pre-baked-deps/node_modules && echo "exists"'],
-                    {}
-                  );
-
-                  if (preBakeCheck.code === 0 && preBakeCheck.stdout.trim() === 'exists') {
-                    console.log(
-                      `[IsolationManager] Checking if pre-baked deps satisfy requirements...`
-                    );
-
-                    // Copy pre-baked deps, then run npm install to add any missing
-                    // This is faster than full npm install: copy is ~2s, npm install adds ~5-10s for missing
-                    const copyResult = await this.execInContainer(
-                      clusterId,
-                      ['sh', '-c', 'cp -rn /pre-baked-deps/node_modules . 2>/dev/null || true'],
-                      {}
-                    );
-
-                    if (copyResult.code === 0) {
-                      console.log(`[IsolationManager] ✓ Copied pre-baked dependencies`);
-
-                      // Run npm install to add any missing deps (much faster with pre-baked base)
-                      const installResult = await this.execInContainer(
-                        clusterId,
-                        [
-                          'sh',
-                          '-c',
-                          'npm_config_engine_strict=false npm install --no-audit --no-fund --prefer-offline',
-                        ],
-                        {}
-                      );
-
-                      if (installResult.code === 0) {
-                        console.log(
-                          `[IsolationManager] ✓ Dependencies installed (pre-baked + incremental)`
-                        );
-                      } else {
-                        // Fallback: full install (pre-baked copy may have caused issues)
-                        console.warn(
-                          `[IsolationManager] Incremental install failed, falling back to full install`
-                        );
-                        await this.execInContainer(
-                          clusterId,
-                          [
-                            'sh',
-                            '-c',
-                            'rm -rf node_modules && npm_config_engine_strict=false npm install --no-audit --no-fund',
-                          ],
-                          {}
-                        );
-                        console.log(`[IsolationManager] ✓ Dependencies installed (full fallback)`);
-                      }
-                    }
-                  } else {
-                    // No pre-baked deps, full npm install with retries
-                    console.log(`[IsolationManager] Installing npm dependencies in container...`);
-
-                    // Retry npm install with exponential backoff (network issues are common)
-                    const maxRetries = 3;
-                    const baseDelay = 2000; // 2 seconds
-                    let installResult = null;
-
-                    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                      try {
-                        installResult = await this.execInContainer(
-                          clusterId,
-                          [
-                            'sh',
-                            '-c',
-                            'npm_config_engine_strict=false npm install --no-audit --no-fund',
-                          ],
-                          {}
-                        );
-
-                        if (installResult.code === 0) {
-                          console.log(`[IsolationManager] ✓ Dependencies installed`);
-                          break; // Success - exit retry loop
-                        }
-
-                        // Failed - retry if not last attempt
-                        // Use stderr if available, otherwise stdout (npm writes some errors to stdout)
-                        const errorOutput = (
-                          installResult.stderr ||
-                          installResult.stdout ||
-                          ''
-                        ).slice(0, 500);
-                        if (attempt < maxRetries) {
-                          const delay = baseDelay * Math.pow(2, attempt - 1);
-                          console.warn(
-                            `[IsolationManager] ⚠️ npm install failed (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`
-                          );
-                          console.warn(`[IsolationManager] Error: ${errorOutput}`);
-                          await new Promise((_resolve) => setTimeout(_resolve, delay));
-                        } else {
-                          console.warn(
-                            `[IsolationManager] ⚠️ npm install failed after ${maxRetries} attempts (non-fatal): ${errorOutput}`
-                          );
-                        }
-                      } catch (execErr) {
-                        if (attempt < maxRetries) {
-                          const delay = baseDelay * Math.pow(2, attempt - 1);
-                          console.warn(
-                            `[IsolationManager] ⚠️ npm install execution error (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`
-                          );
-                          console.warn(`[IsolationManager] Error: ${execErr.message}`);
-                          await new Promise((_resolve) => setTimeout(_resolve, delay));
-                        } else {
-                          throw execErr; // Re-throw on last attempt
-                        }
-                      }
-                    }
-                  }
-                }
-              }
+              await this._installDependenciesWithRetry(clusterId);
             }
           } catch (err) {
             console.warn(
@@ -438,6 +299,81 @@ class IsolationManager {
         reject(new Error(`Docker spawn error: ${err.message}`));
       });
     });
+  }
+
+  async _installDependenciesWithRetry(clusterId) {
+    console.log(`[IsolationManager] Installing npm dependencies in container...`);
+
+    const maxRetries = 3;
+    const baseDelay = 2000; // 2 seconds
+    const installCommand = [
+      'sh',
+      '-c',
+      [
+        'if [ -d node_modules ] && [ -f node_modules/.package-lock.json ]; then',
+        'echo "__deps_present__";',
+        'exit 0;',
+        'fi;',
+        'if ! command -v npm >/dev/null 2>&1; then',
+        'echo "__npm_missing__";',
+        'exit 127;',
+        'fi;',
+        'if [ -d /pre-baked-deps/node_modules ]; then',
+        'cp -rn /pre-baked-deps/node_modules . 2>/dev/null || true;',
+        'npm_config_engine_strict=false npm install --no-audit --no-fund --prefer-offline;',
+        'install_code=$?;',
+        'if [ $install_code -ne 0 ]; then',
+        'rm -rf node_modules;',
+        'npm_config_engine_strict=false npm install --no-audit --no-fund;',
+        'fi;',
+        'else',
+        'npm_config_engine_strict=false npm install --no-audit --no-fund;',
+        'fi',
+      ].join(' '),
+    ];
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const installResult = await this.execInContainer(clusterId, installCommand, {});
+        const stdout = installResult.stdout || '';
+
+        if (installResult.code === 0) {
+          if (stdout.includes('__deps_present__')) {
+            console.log(
+              `[IsolationManager] ✓ Dependencies already installed (skipping npm install)`
+            );
+          } else {
+            console.log(`[IsolationManager] ✓ Dependencies installed`);
+          }
+          return;
+        }
+
+        const errorOutput = (installResult.stderr || installResult.stdout || '').slice(0, 500);
+        if (attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt - 1);
+          console.warn(
+            `[IsolationManager] ⚠️ npm install failed (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`
+          );
+          console.warn(`[IsolationManager] Error: ${errorOutput}`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        } else {
+          console.warn(
+            `[IsolationManager] ⚠️ npm install failed after ${maxRetries} attempts (non-fatal): ${errorOutput}`
+          );
+        }
+      } catch (execErr) {
+        if (attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt - 1);
+          console.warn(
+            `[IsolationManager] ⚠️ npm install execution error (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`
+          );
+          console.warn(`[IsolationManager] Error: ${execErr.message}`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        } else {
+          throw execErr;
+        }
+      }
+    }
   }
 
   /**

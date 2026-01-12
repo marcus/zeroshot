@@ -14,7 +14,7 @@
    - Error: AssertionError [ERR_ASSERTION]: Agent A's messages should be contiguous
    - Expected vs actual: 1 expected, 2 actual
    - Location: tests/integration/message-bus.test.js:441:14
-   - Status: Fixed (pending verification)
+   - Status: Fixed (verified locally)
 
 2. npm install retry logic
    - Suite: Retry mechanism
@@ -22,6 +22,7 @@
    - Error: AssertionError [ERR_ASSERTION]: Should retry twice after initial failure
    - Expected vs actual: 3 expected, 2 actual
    - Location: tests/integration/npm-install-retry.test.js:110:14
+   - Status: Fixed (pending verification)
 
 3. npm install retry logic
    - Suite: Retry mechanism
@@ -29,6 +30,7 @@
    - Error: AssertionError [ERR_ASSERTION]: Should attempt 3 times total
    - Expected vs actual: 3 expected, 2 actual
    - Location: tests/integration/npm-install-retry.test.js:148:14
+   - Status: Fixed (pending verification)
 
 4. npm install retry logic
    - Suite: Retry mechanism
@@ -36,6 +38,7 @@
    - Error: AssertionError [ERR_ASSERTION]: Should only attempt once on success
    - Expected vs actual: 1 expected, 4 actual
    - Location: tests/integration/npm-install-retry.test.js:183:14
+   - Status: Fixed (pending verification)
 
 5. npm install retry logic
    - Suite: Retry mechanism
@@ -43,6 +46,7 @@
    - Error: AssertionError [ERR_ASSERTION]: Should retry after execution errors
    - Expected vs actual: 3 expected, 1 actual
    - Location: tests/integration/npm-install-retry.test.js:249:14
+   - Status: Fixed (pending verification)
 
 6. npm install retry logic
    - Suite: Exponential backoff timing
@@ -50,6 +54,7 @@
    - Error: AssertionError [ERR_ASSERTION]: Should have 3 attempts
    - Expected vs actual: 3 expected, 2 actual
    - Location: tests/integration/npm-install-retry.test.js:291:14
+   - Status: Fixed (pending verification)
 
 7. npm install retry logic
    - Suite: Non-fatal failure behavior
@@ -57,6 +62,7 @@
    - Error: AssertionError [ERR_ASSERTION]: Should log warnings about npm install failures
    - Expected vs actual: true expected, false actual
    - Location: tests/integration/npm-install-retry.test.js:343:9
+   - Status: Fixed (pending verification)
 
 8. Orchestrator Isolation Mode Integration
    - Suite: Container Lifecycle
