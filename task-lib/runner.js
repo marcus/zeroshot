@@ -119,6 +119,7 @@ export async function spawnTask(prompt, options = {}) {
   );
 
   watcher.unref();
+  watcher.disconnect(); // Close IPC channel so parent can exit
 
   return task;
 }
