@@ -103,16 +103,31 @@ function extractErrorContext({ output, statusOutput, taskId, isNotFound = false 
     );
   }
 
-  // Fall back to extracting from output (last 500 chars)
-  const lastOutput = fullOutput.slice(-500).trim();
-  if (!lastOutput) {
+  // NEVER TRUNCATE OUTPUT - truncation corrupts structured JSON and causes false "crash" status
+  // If output is too verbose, that's a prompt problem - fix the prompts, not the data
+  const trimmedOutput = (output || '').trim();
+  if (!trimmedOutput) {
     return sanitizeErrorMessage(
       'Task failed with no output (check if task was interrupted or timed out)'
     );
   }
 
+  // Try to extract structured JSON from output first - it may contain the actual result
+  // even if the task was marked as "failed" due to timeout/stale status
+  try {
+    const { extractJsonFromOutput } = require('./output-extraction');
+    const extracted = extractJsonFromOutput(trimmedOutput);
+    if (extracted && typeof extracted === 'object') {
+      // If we found valid JSON, return it as the error context
+      // This preserves the actual agent output for downstream processing
+      return JSON.stringify(extracted);
+    }
+  } catch {
+    // Extraction failed, fall through to error pattern matching
+  }
+
   // Extract non-JSON lines only (JSON lines contain "is_error": true which falsely matches)
-  const nonJsonLines = lastOutput
+  const nonJsonLines = trimmedOutput
     .split('\n')
     .filter((line) => {
       const trimmed = line.trim();
@@ -122,7 +137,7 @@ function extractErrorContext({ output, statusOutput, taskId, isNotFound = false 
     .join('\n');
 
   // Common error patterns - match against non-JSON content
-  const textToSearch = nonJsonLines || lastOutput;
+  const textToSearch = nonJsonLines || trimmedOutput;
   const errorPatterns = [
     /Error:\s*(.+)/i,
     /error:\s*(.+)/i,
@@ -134,12 +149,14 @@ function extractErrorContext({ output, statusOutput, taskId, isNotFound = false 
   for (const pattern of errorPatterns) {
     const match = textToSearch.match(pattern);
     if (match) {
-      return sanitizeErrorMessage(match[1].slice(0, 200));
+      // Don't truncate - let the full error message through
+      return sanitizeErrorMessage(match[1]);
     }
   }
 
-  // No pattern matched - include last portion of output
-  return sanitizeErrorMessage(`Task failed. Last output: ${lastOutput.slice(-200)}`);
+  // No pattern matched - return full output (no truncation)
+  // If this is too long, the solution is to make agents output less, not to corrupt data
+  return sanitizeErrorMessage(`Task failed. Output: ${trimmedOutput}`);
 }
 
 // Track if we've already ensured the AskUserQuestion hook is installed
