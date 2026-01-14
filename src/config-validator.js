@@ -272,6 +272,28 @@ function analyzeMessageFlow(config) {
       topicProducers.get(outputTopic).push(agent.id);
       agentOutputTopics.get(agent.id).push(outputTopic);
     }
+
+    // Also extract topics that could be dynamically produced by hook logic scripts
+    const hookLogicScript = agent.hooks?.onComplete?.logic?.script;
+    if (hookLogicScript && typeof hookLogicScript === 'string') {
+      // Scan for { topic: 'TOPIC_NAME' } or { topic: "TOPIC_NAME" } patterns
+      const topicMatches = hookLogicScript.match(/topic:\s*['"]([A-Z_]+)['"]/g) || [];
+      for (const match of topicMatches) {
+        const dynamicTopic = match.match(/['"]([A-Z_]+)['"]/)?.[1];
+        if (dynamicTopic && dynamicTopic !== outputTopic) {
+          if (!topicProducers.has(dynamicTopic)) {
+            topicProducers.set(dynamicTopic, []);
+          }
+          // Mark as dynamic producer (append * to indicate it's conditional)
+          if (!topicProducers.get(dynamicTopic).includes(agent.id)) {
+            topicProducers.get(dynamicTopic).push(`${agent.id}*`);
+          }
+          if (!agentOutputTopics.get(agent.id).includes(dynamicTopic)) {
+            agentOutputTopics.get(agent.id).push(dynamicTopic);
+          }
+        }
+      }
+    }
   }
 
   // === CHECK 1: No bootstrap trigger ===
@@ -334,15 +356,25 @@ function analyzeMessageFlow(config) {
   }
 
   // === CHECK 5: Self-triggering agents (instant infinite loop) ===
+  // Skip if trigger or hook has logic block (conditional self-trigger is allowed)
   for (const agent of config.agents) {
     const inputs = agentInputTopics.get(agent.id) || [];
     const outputs = agentOutputTopics.get(agent.id) || [];
     const selfTrigger = inputs.find((t) => outputs.includes(t));
     if (selfTrigger) {
-      errors.push(
-        `Agent '${agent.id}' triggers on '${selfTrigger}' and produces '${selfTrigger}'. ` +
-          'Instant infinite loop.'
+      // Check if the self-trigger is conditional (has logic block on trigger or hook)
+      const triggerHasLogic = agent.triggers?.some(
+        (t) => t.topic === selfTrigger && t.logic?.script
       );
+      const hookHasLogic = agent.hooks?.onComplete?.logic?.script;
+
+      if (!triggerHasLogic && !hookHasLogic) {
+        errors.push(
+          `Agent '${agent.id}' triggers on '${selfTrigger}' and produces '${selfTrigger}'. ` +
+            'Instant infinite loop.'
+        );
+      }
+      // If either has logic, it's a controlled self-trigger pattern (e.g., progress updates)
     }
   }
 
@@ -915,6 +947,39 @@ function validateHookSemantics(config) {
                 `Fix: return { topic: "CLUSTER_OPERATIONS", content: { data: { operations: JSON.stringify([...]) } } }`
             );
           }
+        }
+      }
+
+      // === Logic block validation ===
+      // Logic blocks allow conditional config overrides (like trigger logic)
+      if (hook.logic) {
+        if (hook.logic.engine && hook.logic.engine !== 'javascript') {
+          errors.push(
+            `${prefix}: Hook logic engine must be 'javascript', got: '${hook.logic.engine}'`
+          );
+        }
+
+        if (!hook.logic.script) {
+          errors.push(`${prefix}: Hook logic must have a 'script' property`);
+        } else if (typeof hook.logic.script !== 'string') {
+          errors.push(`${prefix}: Hook logic script must be a string`);
+        } else {
+          // Validate script syntax
+          try {
+            const vm = require('vm');
+            const wrappedScript = `(function() { 'use strict'; ${hook.logic.script} })()`;
+            new vm.Script(wrappedScript);
+          } catch (syntaxError) {
+            errors.push(`${prefix}: Hook logic script has syntax error: ${syntaxError.message}`);
+          }
+        }
+
+        // Logic blocks require config (they modify config, not replace it)
+        if (!hook.config && !hook.transform) {
+          errors.push(
+            `${prefix}: Hook with logic block must also have 'config' or 'transform'. ` +
+              `Logic provides overrides, not the full message.`
+          );
         }
       }
     }

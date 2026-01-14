@@ -5,10 +5,39 @@
  * - Hook execution (publish_message, stop_cluster, etc.)
  * - Template variable substitution
  * - Transform script execution in VM sandbox
+ * - Logic scripts for conditional config (like triggers)
  */
 
 const vm = require('vm');
 const { execSync } = require('../lib/safe-exec'); // Enforces timeouts
+
+/**
+ * Deep merge two objects, with source taking precedence
+ * @param {Object} target - Base object
+ * @param {Object} source - Override object
+ * @returns {Object} Merged object
+ */
+function deepMerge(target, source) {
+  if (!source || typeof source !== 'object') return target;
+  if (!target || typeof target !== 'object') return source;
+
+  const result = { ...target };
+  for (const key of Object.keys(source)) {
+    if (
+      source[key] &&
+      typeof source[key] === 'object' &&
+      !Array.isArray(source[key]) &&
+      target[key] &&
+      typeof target[key] === 'object' &&
+      !Array.isArray(target[key])
+    ) {
+      result[key] = deepMerge(target[key], source[key]);
+    } else {
+      result[key] = source[key];
+    }
+  }
+  return result;
+}
 
 /**
  * Execute a hook
@@ -43,16 +72,50 @@ async function executeHook(params) {
     let messageToPublish;
 
     if (hook.transform) {
-      // NEW: Execute transform script to generate message
+      // Transform scripts handle their own logic - no additional processing needed
       messageToPublish = await executeTransform({
         transform: hook.transform,
         context,
         agent,
       });
     } else {
-      // Existing: Use template substitution
+      // Template-based config - may have logic block for conditional overrides
+      let effectiveConfig = hook.config;
+
+      // If hook has logic block, evaluate it to get config overrides
+      if (hook.logic) {
+        // Parse result data for logic evaluation (if available)
+        let resultData = null;
+        if (result?.output) {
+          try {
+            resultData = await agent._parseResultOutput(result.output);
+          } catch (parseError) {
+            // If logic script doesn't use result, parsing failure is OK
+            // If it does use result, evaluateHookLogic will fail appropriately
+            agent._log(
+              `⚠️  Hook logic: result parsing failed, continuing with null: ${parseError.message}`
+            );
+          }
+        }
+
+        // Evaluate logic script
+        const overrides = evaluateHookLogic({
+          logic: hook.logic,
+          resultData,
+          agent,
+          context,
+        });
+
+        // Deep merge overrides into config
+        if (overrides) {
+          agent._log(`Hook logic returned overrides: ${JSON.stringify(overrides)}`);
+          effectiveConfig = deepMerge(hook.config, overrides);
+        }
+      }
+
+      // Now do template substitution on the (possibly modified) config
       messageToPublish = await substituteTemplate({
-        config: hook.config,
+        config: effectiveConfig,
         context,
         agent,
         cluster,
@@ -409,8 +472,91 @@ async function substituteTemplate(params) {
   return result;
 }
 
+/**
+ * Evaluate hook logic script to get config overrides
+ * Similar to trigger logic, but returns an object to merge into config
+ * @param {Object} params - Evaluation parameters
+ * @param {Object} params.logic - Logic configuration { engine, script }
+ * @param {Object} params.resultData - Parsed agent result data
+ * @param {Object} params.agent - Agent instance
+ * @param {Object} params.context - Execution context
+ * @returns {Object|null} Config overrides to merge, or null if none
+ */
+function evaluateHookLogic(params) {
+  const { logic, resultData, agent, context } = params;
+
+  if (!logic || !logic.script) {
+    return null;
+  }
+
+  if (logic.engine !== 'javascript') {
+    throw new Error(`Unsupported hook logic engine: ${logic.engine}`);
+  }
+
+  // Build sandbox context - similar to LogicEngine but focused on result data
+  const sandbox = {
+    // The parsed result from agent output - this is the main input
+    result: resultData || {},
+
+    // Agent context
+    agent: {
+      id: agent.id,
+      role: agent.role,
+      iteration: agent.iteration || 0,
+    },
+
+    // Triggering message (if available)
+    message: context.triggeringMessage || null,
+
+    // Safe built-ins
+    Set,
+    Map,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Math,
+    Date,
+    JSON,
+
+    // Console for debugging (logs to agent log)
+    console: {
+      log: (...args) => agent._log('[hook-logic]', ...args),
+      error: (...args) => console.error('[hook-logic]', ...args),
+      warn: (...args) => console.warn('[hook-logic]', ...args),
+    },
+  };
+
+  // Execute in VM sandbox with timeout
+  const vmContext = vm.createContext(sandbox);
+  const wrappedScript = `(function() { 'use strict'; ${logic.script} })()`;
+
+  let result;
+  try {
+    result = vm.runInContext(wrappedScript, vmContext, { timeout: 1000 });
+  } catch (err) {
+    throw new Error(`Hook logic script error: ${err.message}`);
+  }
+
+  // Logic scripts can return:
+  // - undefined/null: no overrides
+  // - object: merge into config
+  if (result === undefined || result === null) {
+    return null;
+  }
+
+  if (typeof result !== 'object') {
+    throw new Error(`Hook logic script must return an object or undefined, got: ${typeof result}`);
+  }
+
+  return result;
+}
+
 module.exports = {
   executeHook,
   executeTransform,
   substituteTemplate,
+  evaluateHookLogic,
+  deepMerge,
 };
