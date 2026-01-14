@@ -196,6 +196,54 @@ Zeroshot is a message-driven coordination layer with smart defaults.
 - Validators approve or reject with specific findings.
 - Rejections route back to the worker for fixes.
 
+```
+                                ┌─────────────────┐
+                                │      TASK       │
+                                └────────┬────────┘
+                                         │
+                                         ▼
+                ┌────────────────────────────────────────────┐
+                │                 CONDUCTOR                  │
+                │     Complexity × TaskType → Workflow       │
+                └────────────────────────┬───────────────────┘
+                                         │
+           ┌─────────────────────────────┼─────────────────────────────┐
+           │                             │                             │
+           ▼                             ▼                             ▼
+     ┌───────────┐                ┌───────────┐                ┌───────────┐
+     │  TRIVIAL  │                │  SIMPLE   │                │ STANDARD+ │
+     │  1 agent  │──────────▶     │  worker   │                │ planner   │
+     │ (level1)  │  COMPLETE      │ + 1 valid.│                │ + worker  │
+     │ no valid. │                └─────┬─────┘                │ + 3-5 val.│
+     └───────────┘                      │                      └─────┬─────┘
+                                        ▼                            │
+                                 ┌─────────────┐                     ▼
+                             ┌──▶│   WORKER    │             ┌─────────────┐
+                             │   └──────┬──────┘             │   PLANNER   │
+                             │          │                    └──────┬──────┘
+                             │          ▼                           │
+                             │   ┌─────────────────────┐            ▼
+                             │   │ ✓ validator         │     ┌─────────────┐
+                             │   │   (generic check)   │ ┌──▶│   WORKER    │
+                             │   └──────────┬──────────┘ │   └──────┬──────┘
+                             │       REJECT │ ALL OK     │          │
+                             └──────────────┘     │      │          ▼
+                                                  │      │   ┌──────────────────────┐
+                                                  │      │   │ ✓ requirements       │
+                                                  │      │   │ ✓ code (STANDARD+)   │
+                                                  │      │   │ ✓ security (CRIT)    │
+                                                  │      │   │ ✓ tester (CRIT)      │
+                                                  │      │   │ ✓ adversarial        │
+                                                  │      │   │   (real execution)   │
+                                                  │      │   └──────────┬───────────┘
+                                                  │      │       REJECT │ ALL OK
+                                                  │      └──────────────┘     │
+                                                  ▼                           ▼
+     ┌─────────────────────────────────────────────────────────────────────────────┐
+     │                                COMPLETE                                     │
+     └─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ### Complexity Model
 
 | Task                   | Complexity | Agents | Validators                                        |
