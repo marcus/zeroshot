@@ -56,48 +56,58 @@ function getChildPids(pid) {
   const children = [];
 
   try {
-    if (PLATFORM === 'darwin') {
-      // macOS: Use pgrep with -P flag
-      const output = execSync(`pgrep -P ${escapeShell(String(pid))} 2>/dev/null`, {
-        encoding: 'utf8',
-        timeout: 2000,
-      });
-      const pids = output.trim().split('\n').filter(Boolean).map(Number);
-      children.push(...pids);
+    const childPids =
+      PLATFORM === 'darwin' ? collectDarwinChildPids(pid) : collectLinuxChildPids(pid);
+    children.push(...childPids);
 
-      // Recursively get grandchildren
-      for (const childPid of pids) {
-        children.push(...getChildPids(childPid));
-      }
-    } else {
-      // Linux: Read /proc/{pid}/task/{tid}/children
-      const taskPath = `/proc/${pid}/task`;
-      if (fs.existsSync(taskPath)) {
-        const tids = fs.readdirSync(taskPath);
-        for (const tid of tids) {
-          const childrenPath = `/proc/${pid}/task/${tid}/children`;
-          if (fs.existsSync(childrenPath)) {
-            const childPids = fs
-              .readFileSync(childrenPath, 'utf8')
-              .trim()
-              .split(/\s+/)
-              .filter(Boolean)
-              .map(Number);
-            children.push(...childPids);
-
-            // Recursively get grandchildren
-            for (const childPid of childPids) {
-              children.push(...getChildPids(childPid));
-            }
-          }
-        }
-      }
+    // Recursively get grandchildren
+    for (const childPid of childPids) {
+      children.push(...getChildPids(childPid));
     }
   } catch {
     // Ignore errors (process may have exited)
   }
 
   return [...new Set(children)]; // Dedupe
+}
+
+function collectDarwinChildPids(pid) {
+  const output = execSync(`pgrep -P ${escapeShell(String(pid))} 2>/dev/null`, {
+    encoding: 'utf8',
+    timeout: 2000,
+  });
+
+  return output.trim().split('\n').filter(Boolean).map(Number);
+}
+
+function collectLinuxChildPids(pid) {
+  const taskPath = `/proc/${pid}/task`;
+  if (!fs.existsSync(taskPath)) {
+    return [];
+  }
+
+  const tids = fs.readdirSync(taskPath);
+  const childPids = [];
+
+  for (const tid of tids) {
+    const childrenPath = `/proc/${pid}/task/${tid}/children`;
+    childPids.push(...readChildPidFile(childrenPath));
+  }
+
+  return childPids;
+}
+
+function readChildPidFile(childrenPath) {
+  if (!fs.existsSync(childrenPath)) {
+    return [];
+  }
+
+  const raw = fs.readFileSync(childrenPath, 'utf8').trim();
+  if (!raw) {
+    return [];
+  }
+
+  return raw.split(/\s+/).filter(Boolean).map(Number);
 }
 
 /**
