@@ -1845,6 +1845,139 @@ function printFinishTaskStarted(cluster) {
   console.log(chalk.dim('Monitor with: zeroshot list'));
 }
 
+async function getPurgeData(orchestrator) {
+  const clusters = orchestrator.listClusters();
+  const runningClusters = clusters.filter(
+    (cluster) => cluster.state === 'running' || cluster.state === 'initializing'
+  );
+  const { loadTasks } = await import('../task-lib/store.js');
+  const { isProcessRunning } = await import('../task-lib/runner.js');
+  const tasks = Object.values(loadTasks());
+  const runningTasks = tasks.filter(
+    (task) => task.status === 'running' && isProcessRunning(task.pid)
+  );
+  return { clusters, runningClusters, tasks, runningTasks, isProcessRunning };
+}
+
+function printPurgeSummary({ clusters, runningClusters, tasks, runningTasks }) {
+  console.log(chalk.bold('\nWill kill and delete:'));
+  if (clusters.length > 0) {
+    console.log(chalk.cyan(`  ${clusters.length} cluster(s) with all history`));
+    if (runningClusters.length > 0) {
+      console.log(chalk.yellow(`    ${runningClusters.length} running`));
+    }
+  }
+  if (tasks.length > 0) {
+    console.log(chalk.yellow(`  ${tasks.length} task(s) with all logs`));
+    if (runningTasks.length > 0) {
+      console.log(chalk.yellow(`    ${runningTasks.length} running`));
+    }
+  }
+  console.log('');
+}
+
+async function confirmPurge(options) {
+  if (options.yes) {
+    return true;
+  }
+  const readline = require('readline');
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const answer = await new Promise((resolve) => {
+    rl.question(
+      chalk.bold.red(
+        'This will kill all processes and permanently delete all data. Proceed? [y/N] '
+      ),
+      resolve
+    );
+  });
+  rl.close();
+  return answer.toLowerCase() === 'y';
+}
+
+async function killRunningClusters(orchestrator, runningClusters) {
+  if (runningClusters.length === 0) {
+    return;
+  }
+  console.log(chalk.bold('Killing running clusters...'));
+  const clusterResults = await orchestrator.killAll();
+  for (const id of clusterResults.killed) {
+    console.log(chalk.green(`✓ Killed cluster: ${id}`));
+  }
+  for (const err of clusterResults.errors) {
+    console.log(chalk.red(`✗ Failed to kill cluster ${err.id}: ${err.error}`));
+  }
+}
+
+async function killRunningTasks(runningTasks, isProcessRunning) {
+  if (runningTasks.length === 0) {
+    return;
+  }
+  console.log(chalk.bold('Killing running tasks...'));
+  const { killTask } = await import('../task-lib/runner.js');
+  const { updateTask } = await import('../task-lib/store.js');
+
+  for (const task of runningTasks) {
+    if (!isProcessRunning(task.pid)) {
+      updateTask(task.id, {
+        status: 'stale',
+        error: 'Process died unexpectedly',
+      });
+      console.log(chalk.yellow(`○ Task ${task.id} was already dead, marked stale`));
+      continue;
+    }
+
+    const killed = killTask(task.pid);
+    if (killed) {
+      updateTask(task.id, { status: 'killed', error: 'Killed by clear' });
+      console.log(chalk.green(`✓ Killed task: ${task.id}`));
+    } else {
+      console.log(chalk.red(`✗ Failed to kill task: ${task.id}`));
+    }
+  }
+}
+
+function deleteClusterData(orchestrator, clusters) {
+  if (clusters.length === 0) {
+    return;
+  }
+  console.log(chalk.bold('Deleting cluster data...'));
+  const clustersFile = path.join(orchestrator.storageDir, 'clusters.json');
+  const clustersDir = path.join(orchestrator.storageDir, 'clusters');
+
+  for (const cluster of clusters) {
+    const dbPath = path.join(orchestrator.storageDir, `${cluster.id}.db`);
+    if (fs.existsSync(dbPath)) {
+      fs.unlinkSync(dbPath);
+      console.log(chalk.green(`✓ Deleted cluster database: ${cluster.id}.db`));
+    }
+  }
+
+  if (fs.existsSync(clustersFile)) {
+    fs.unlinkSync(clustersFile);
+    console.log(chalk.green(`✓ Deleted clusters.json`));
+  }
+
+  if (fs.existsSync(clustersDir)) {
+    fs.rmSync(clustersDir, { recursive: true, force: true });
+    console.log(chalk.green(`✓ Deleted clusters/ directory`));
+  }
+
+  orchestrator.clusters.clear();
+}
+
+async function deleteTaskData(tasks) {
+  if (tasks.length === 0) {
+    return;
+  }
+  console.log(chalk.bold('Deleting task data...'));
+  const { cleanTasks } = await import('../task-lib/commands/clean.js');
+  await cleanTasks({ all: true });
+}
+
 // Lazy-loaded orchestrator (quiet by default) - created on first use
 /** @type {import('../src/orchestrator') | null} */
 let _orchestrator = null;
@@ -3003,141 +3136,26 @@ program
   .action(async (options) => {
     try {
       const orchestrator = await getOrchestrator();
+      const purgeData = await getPurgeData(orchestrator);
 
-      // Get counts first
-      const clusters = orchestrator.listClusters();
-      const runningClusters = clusters.filter(
-        (c) => c.state === 'running' || c.state === 'initializing'
-      );
-
-      const { loadTasks } = await import('../task-lib/store.js');
-      const { isProcessRunning } = await import('../task-lib/runner.js');
-      const tasks = Object.values(loadTasks());
-      const runningTasks = tasks.filter((t) => t.status === 'running' && isProcessRunning(t.pid));
-
-      // Check if there's anything to clear
-      if (clusters.length === 0 && tasks.length === 0) {
+      if (purgeData.clusters.length === 0 && purgeData.tasks.length === 0) {
         console.log(chalk.dim('No clusters or tasks to clear.'));
         return;
       }
 
-      // Show what will be cleared
-      console.log(chalk.bold('\nWill kill and delete:'));
-      if (clusters.length > 0) {
-        console.log(chalk.cyan(`  ${clusters.length} cluster(s) with all history`));
-        if (runningClusters.length > 0) {
-          console.log(chalk.yellow(`    ${runningClusters.length} running`));
-        }
-      }
-      if (tasks.length > 0) {
-        console.log(chalk.yellow(`  ${tasks.length} task(s) with all logs`));
-        if (runningTasks.length > 0) {
-          console.log(chalk.yellow(`    ${runningTasks.length} running`));
-        }
-      }
-      console.log('');
-
-      // Confirm unless -y flag
-      if (!options.yes) {
-        const readline = require('readline');
-        const rl = readline.createInterface({
-          input: process.stdin,
-          output: process.stdout,
-        });
-
-        const answer = await new Promise((resolve) => {
-          rl.question(
-            chalk.bold.red(
-              'This will kill all processes and permanently delete all data. Proceed? [y/N] '
-            ),
-            resolve
-          );
-        });
-        rl.close();
-
-        if (answer.toLowerCase() !== 'y') {
-          console.log('Aborted.');
-          return;
-        }
+      printPurgeSummary(purgeData);
+      const confirmed = await confirmPurge(options);
+      if (!confirmed) {
+        console.log('Aborted.');
+        return;
       }
 
       console.log('');
 
-      // Kill running clusters first
-      if (runningClusters.length > 0) {
-        console.log(chalk.bold('Killing running clusters...'));
-        const clusterResults = await orchestrator.killAll();
-        for (const id of clusterResults.killed) {
-          console.log(chalk.green(`✓ Killed cluster: ${id}`));
-        }
-        for (const err of clusterResults.errors) {
-          console.log(chalk.red(`✗ Failed to kill cluster ${err.id}: ${err.error}`));
-        }
-      }
-
-      // Kill running tasks
-      if (runningTasks.length > 0) {
-        console.log(chalk.bold('Killing running tasks...'));
-        const { killTask } = await import('../task-lib/runner.js');
-        const { updateTask } = await import('../task-lib/store.js');
-
-        for (const task of runningTasks) {
-          if (!isProcessRunning(task.pid)) {
-            updateTask(task.id, {
-              status: 'stale',
-              error: 'Process died unexpectedly',
-            });
-            console.log(chalk.yellow(`○ Task ${task.id} was already dead, marked stale`));
-            continue;
-          }
-
-          const killed = killTask(task.pid);
-          if (killed) {
-            updateTask(task.id, { status: 'killed', error: 'Killed by clear' });
-            console.log(chalk.green(`✓ Killed task: ${task.id}`));
-          } else {
-            console.log(chalk.red(`✗ Failed to kill task: ${task.id}`));
-          }
-        }
-      }
-
-      // Delete all cluster data
-      if (clusters.length > 0) {
-        console.log(chalk.bold('Deleting cluster data...'));
-        const clustersFile = path.join(orchestrator.storageDir, 'clusters.json');
-        const clustersDir = path.join(orchestrator.storageDir, 'clusters');
-
-        // Delete all cluster databases
-        for (const cluster of clusters) {
-          const dbPath = path.join(orchestrator.storageDir, `${cluster.id}.db`);
-          if (fs.existsSync(dbPath)) {
-            fs.unlinkSync(dbPath);
-            console.log(chalk.green(`✓ Deleted cluster database: ${cluster.id}.db`));
-          }
-        }
-
-        // Delete clusters.json
-        if (fs.existsSync(clustersFile)) {
-          fs.unlinkSync(clustersFile);
-          console.log(chalk.green(`✓ Deleted clusters.json`));
-        }
-
-        // Delete clusters directory if exists
-        if (fs.existsSync(clustersDir)) {
-          fs.rmSync(clustersDir, { recursive: true, force: true });
-          console.log(chalk.green(`✓ Deleted clusters/ directory`));
-        }
-
-        // Clear in-memory clusters
-        orchestrator.clusters.clear();
-      }
-
-      // Delete all task data
-      if (tasks.length > 0) {
-        console.log(chalk.bold('Deleting task data...'));
-        const { cleanTasks } = await import('../task-lib/commands/clean.js');
-        await cleanTasks({ all: true });
-      }
+      await killRunningClusters(orchestrator, purgeData.runningClusters);
+      await killRunningTasks(purgeData.runningTasks, purgeData.isProcessRunning);
+      deleteClusterData(orchestrator, purgeData.clusters);
+      await deleteTaskData(purgeData.tasks);
 
       console.log(chalk.bold.green('\nAll runs purged.'));
     } catch (error) {
