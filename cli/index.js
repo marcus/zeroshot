@@ -5115,52 +5115,28 @@ function formatAgentOutput(msg, prefix) {
   }
 }
 
-// Handle AGENT_ERROR in normal mode
-function formatAgentErrorMessage(msg, prefix, timestamp) {
-  safePrint('');
-  safePrint(chalk.bold.red(`${'─'.repeat(60)}`));
-  safePrint(`${prefix} ${chalk.gray(timestamp)} ${chalk.bold.red('🔴 AGENT ERROR')}`);
-  if (msg.content?.text) {
-    safePrint(`${prefix} ${chalk.red(msg.content.text)}`);
-  }
-  if (msg.content?.data?.stack) {
-    const stackLines = msg.content.data.stack.split('\n').slice(0, 5);
-    for (const line of stackLines) {
-      if (line.trim()) {
-        safePrint(`${prefix} ${chalk.dim(line)}`);
-      }
-    }
-  }
-  safePrint(chalk.bold.red(`${'─'.repeat(60)}`));
-}
-
-// Handle ISSUE_OPENED in normal mode
-function formatIssueOpenedMessage(msg, prefix, timestamp) {
-  if (shownNewTaskForCluster.has(msg.cluster_id)) return;
-  shownNewTaskForCluster.add(msg.cluster_id);
-
-  safePrint('');
-  safePrint(chalk.bold.blue(`${'─'.repeat(60)}`));
-  safePrint(`${prefix} ${chalk.gray(timestamp)} ${chalk.bold.blue('📋 NEW TASK')}`);
-  if (msg.content?.text) {
-    const lines = msg.content.text.split('\n').slice(0, 3);
-    for (const line of lines) {
-      if (line.trim() && line.trim() !== '# Manual Input') {
-        safePrint(`${prefix} ${chalk.white(line)}`);
-      }
-    }
-  }
-  safePrint(chalk.bold.blue(`${'─'.repeat(60)}`));
-}
+const NORMAL_MESSAGE_HANDLERS = {
+  AGENT_LIFECYCLE: ({ msg, prefix }) => formatAgentLifecycle(msg, prefix),
+  AGENT_ERROR: ({ msg, prefix, timestamp }) => formatAgentErrorNormal(msg, prefix, timestamp),
+  ISSUE_OPENED: ({ msg, prefix, timestamp }) =>
+    formatIssueOpenedNormal(msg, prefix, timestamp, shownNewTaskForCluster),
+  IMPLEMENTATION_READY: ({ msg, prefix, timestamp }) =>
+    formatImplementationReadyNormal(msg, prefix, timestamp),
+  VALIDATION_RESULT: ({ msg, prefix, timestamp }) =>
+    formatValidationResultNormal(msg, prefix, timestamp),
+  PR_CREATED: ({ msg, prefix, timestamp }) => formatPrCreated(msg, prefix, timestamp, safePrint),
+  CLUSTER_COMPLETE: ({ msg, prefix, timestamp }) =>
+    formatClusterComplete(msg, prefix, timestamp, safePrint),
+  CLUSTER_FAILED: ({ msg, prefix, timestamp }) =>
+    formatClusterFailed(msg, prefix, timestamp, safePrint),
+  AGENT_OUTPUT: ({ msg, prefix }) => formatAgentOutput(msg, prefix),
+};
 
 // Helper function to print a message (docker-compose style with colors)
 function printMessage(msg, showClusterId = false, watchMode = false, isActive = true) {
   // Build prefix using utility function
   const prefix = buildMessagePrefix(msg, showClusterId, isActive);
-
-  const timestamp = new Date(msg.timestamp).toLocaleTimeString('en-US', {
-    hour12: false,
-  });
+  const timestamp = formatLogTimestamp(msg.timestamp);
 
   // Watch mode: delegate to watch mode formatter
   if (watchMode) {
@@ -5170,137 +5146,9 @@ function printMessage(msg, showClusterId = false, watchMode = false, isActive = 
   }
 
   // Normal mode: delegate to appropriate formatter based on topic
-  if (msg.topic === 'AGENT_LIFECYCLE') {
-    formatAgentLifecycle(msg, prefix);
-    return;
-  }
-
-  if (msg.topic === 'AGENT_ERROR') {
-    formatAgentErrorNormal(msg, prefix, timestamp);
-    return;
-  }
-
-  if (msg.topic === 'ISSUE_OPENED') {
-    formatIssueOpenedNormal(msg, prefix, timestamp, shownNewTaskForCluster);
-    return;
-  }
-
-  if (msg.topic === 'IMPLEMENTATION_READY') {
-    formatImplementationReadyNormal(msg, prefix, timestamp);
-    return;
-  }
-
-  if (msg.topic === 'VALIDATION_RESULT') {
-    formatValidationResultNormal(msg, prefix, timestamp);
-    return;
-  }
-
-  if (msg.topic === 'PR_CREATED') {
-    formatPrCreated(msg, prefix, timestamp, safePrint);
-    return;
-  }
-
-  if (msg.topic === 'CLUSTER_COMPLETE') {
-    formatClusterComplete(msg, prefix, timestamp, safePrint);
-    return;
-  }
-
-  if (msg.topic === 'CLUSTER_FAILED') {
-    formatClusterFailed(msg, prefix, timestamp, safePrint);
-    return;
-  }
-
-  // Delegate to extracted handlers for complex topics
-  if (msg.topic === 'AGENT_OUTPUT') {
-    formatAgentOutput(msg, prefix);
-    return;
-  }
-
-  if (msg.topic === 'AGENT_ERROR') {
-    formatAgentErrorMessage(msg, prefix, timestamp);
-    return;
-  }
-
-  if (msg.topic === 'ISSUE_OPENED') {
-    formatIssueOpenedMessage(msg, prefix, timestamp);
-    return;
-  }
-
-  // IMPLEMENTATION_READY: milestone marker
-  if (msg.topic === 'IMPLEMENTATION_READY') {
-    safePrint(`${prefix} ${chalk.gray(timestamp)} ${chalk.bold.yellow('✅ IMPLEMENTATION READY')}`);
-    if (msg.content?.data?.commit) {
-      safePrint(
-        `${prefix} ${chalk.gray('Commit:')} ${chalk.cyan(msg.content.data.commit.substring(0, 8))}`
-      );
-    }
-    return;
-  }
-
-  // VALIDATION_RESULT: show approval/rejection clearly
-  if (msg.topic === 'VALIDATION_RESULT') {
-    const data = msg.content?.data || {};
-    const approved = data.approved === true || data.approved === 'true';
-    const status = approved ? chalk.bold.green('✓ APPROVED') : chalk.bold.red('✗ REJECTED');
-
-    safePrint(`${prefix} ${chalk.gray(timestamp)} ${status}`);
-
-    // Show summary if present and not a template variable
-    if (msg.content?.text && !msg.content.text.includes('{{')) {
-      safePrint(`${prefix} ${msg.content.text.substring(0, 100)}`);
-    }
-
-    // Show full JSON data structure
-    safePrint(
-      `${prefix} ${chalk.dim(JSON.stringify(data, null, 2).split('\n').join(`\n${prefix} `))}`
-    );
-
-    // Show errors/issues if any
-    if (data.errors && Array.isArray(data.errors) && data.errors.length > 0) {
-      safePrint(`${prefix} ${chalk.red('Errors:')}`);
-      data.errors.forEach((err) => {
-        if (err && typeof err === 'string') {
-          safePrint(`${prefix}   - ${err}`);
-        }
-      });
-    }
-
-    if (data.issues && Array.isArray(data.issues) && data.issues.length > 0) {
-      safePrint(`${prefix} ${chalk.yellow('Issues:')}`);
-      data.issues.forEach((issue) => {
-        if (issue && typeof issue === 'string') {
-          safePrint(`${prefix}   - ${issue}`);
-        }
-      });
-    }
-
-    // Show CANNOT_VALIDATE (permanent) as warnings, CANNOT_VALIDATE_YET (temporary) as errors
-    const criteriaResults = data.criteriaResults;
-    if (Array.isArray(criteriaResults)) {
-      // CANNOT_VALIDATE_YET = temporary, treated as FAIL (work incomplete)
-      const cannotValidateYet = criteriaResults.filter((c) => c.status === 'CANNOT_VALIDATE_YET');
-      if (cannotValidateYet.length > 0) {
-        safePrint(
-          `${prefix} ${chalk.red('❌ Cannot validate yet')} (${cannotValidateYet.length} criteria - work incomplete):`
-        );
-        for (const cv of cannotValidateYet) {
-          safePrint(`${prefix}   ${chalk.red('•')} ${cv.id}: ${cv.reason || 'No reason provided'}`);
-        }
-      }
-
-      // CANNOT_VALIDATE = permanent, treated as PASS (environmental limitation)
-      const cannotValidate = criteriaResults.filter((c) => c.status === 'CANNOT_VALIDATE');
-      if (cannotValidate.length > 0) {
-        safePrint(
-          `${prefix} ${chalk.yellow('⚠️ Could not validate')} (${cannotValidate.length} criteria - permanent):`
-        );
-        for (const cv of cannotValidate) {
-          safePrint(
-            `${prefix}   ${chalk.yellow('•')} ${cv.id}: ${cv.reason || 'No reason provided'}`
-          );
-        }
-      }
-    }
+  const handler = NORMAL_MESSAGE_HANDLERS[msg.topic];
+  if (handler) {
+    handler({ msg, prefix, timestamp });
     return;
   }
 
