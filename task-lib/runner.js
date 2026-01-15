@@ -40,7 +40,15 @@ export async function spawnTask(prompt, options = {}) {
   });
 
   const finalArgs = resolveFinalArgs(commandSpec, providerName, options);
-  const task = buildTaskRecord(id, prompt, cwd, options, logFile, providerName, modelSpec);
+  const task = buildTaskRecord({
+    id,
+    prompt,
+    cwd,
+    options,
+    logFile,
+    providerName,
+    modelSpec,
+  });
 
   addTask(task);
 
@@ -52,7 +60,14 @@ export async function spawnTask(prompt, options = {}) {
     commandSpec
   );
   const watcherScript = resolveWatcherScript(options);
-  spawnWatcher(watcherScript, id, cwd, logFile, finalArgs, watcherConfig);
+  spawnWatcher({
+    watcherScript,
+    id,
+    cwd,
+    logFile,
+    finalArgs,
+    watcherConfig,
+  });
 
   return task;
 }
@@ -111,7 +126,7 @@ function resolveFinalArgs(commandSpec, providerName, options) {
   return finalArgs;
 }
 
-function buildTaskRecord(id, prompt, cwd, options, logFile, providerName, modelSpec) {
+function buildTaskRecord({ id, prompt, cwd, options, logFile, providerName, modelSpec }) {
   return {
     id,
     prompt: prompt.slice(0, 200) + (prompt.length > 200 ? '...' : ''),
@@ -151,7 +166,7 @@ function resolveWatcherScript(options) {
   return useAttachable ? join(__dirname, 'attachable-watcher.js') : join(__dirname, 'watcher.js');
 }
 
-function spawnWatcher(watcherScript, id, cwd, logFile, finalArgs, watcherConfig) {
+function spawnWatcher({ watcherScript, id, cwd, logFile, finalArgs, watcherConfig }) {
   const watcher = fork(
     watcherScript,
     [id, cwd, logFile, JSON.stringify(finalArgs), JSON.stringify(watcherConfig)],
