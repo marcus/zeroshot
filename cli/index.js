@@ -756,6 +756,131 @@ function printListJson(enrichedClusters, tasks) {
   );
 }
 
+function reportMissingId(id, options) {
+  if (options.json) {
+    console.log(JSON.stringify({ error: 'ID not found', id }, null, 2));
+  } else {
+    console.error(`ID not found: ${id}`);
+    console.error('Not found in tasks or clusters');
+  }
+  process.exit(1);
+}
+
+function getClusterTokensByRole(orchestrator, clusterId) {
+  try {
+    const cluster = orchestrator.getCluster(clusterId);
+    if (cluster?.messageBus) {
+      return cluster.messageBus.getTokensByRole(clusterId);
+    }
+  } catch {
+    /* Token tracking not available */
+  }
+  return null;
+}
+
+function printClusterStatusJson(status, tokensByRole) {
+  console.log(
+    JSON.stringify(
+      {
+        type: 'cluster',
+        ...status,
+        createdAtISO: new Date(status.createdAt).toISOString(),
+        tokensByRole,
+      },
+      null,
+      2
+    )
+  );
+}
+
+function printClusterStatusHeader(status, clusterId) {
+  console.log(`\nCluster: ${status.id}`);
+  if (status.isZombie) {
+    console.log(
+      chalk.red(
+        `State: ${status.state} (process ${status.pid} died, cluster has no backing process)`
+      )
+    );
+    console.log(
+      chalk.yellow(
+        `  → Run 'zeroshot kill ${clusterId}' to clean up, or 'zeroshot resume ${clusterId}' to restart`
+      )
+    );
+  } else {
+    console.log(`State: ${status.state}`);
+  }
+  if (status.pid) {
+    console.log(`PID: ${status.pid}`);
+  }
+  console.log(`Created: ${new Date(status.createdAt).toLocaleString()}`);
+  console.log(`Messages: ${status.messageCount}`);
+}
+
+function printClusterTokenUsage(tokensByRole) {
+  if (!tokensByRole) {
+    return;
+  }
+  const tokenLines = formatTokenUsage(tokensByRole);
+  if (!tokenLines) {
+    return;
+  }
+  console.log('');
+  for (const line of tokenLines) {
+    console.log(line);
+  }
+}
+
+function printClusterAgent(agent) {
+  if (agent.type === 'subcluster') {
+    console.log(`  - ${agent.id} (${agent.role}) [SubCluster]`);
+    console.log(`    State: ${agent.state}`);
+    console.log(`    Iteration: ${agent.iteration}`);
+    console.log(`    Child Cluster: ${agent.childClusterId || 'none'}`);
+    console.log(`    Child Running: ${agent.childRunning ? 'Yes' : 'No'}`);
+    return;
+  }
+  const modelLabel = agent.model ? ` [${agent.model}]` : '';
+  console.log(`  - ${agent.id} (${agent.role})${modelLabel}`);
+  console.log(`    State: ${agent.state}`);
+  console.log(`    Iteration: ${agent.iteration}`);
+  console.log(`    Running task: ${agent.currentTask ? 'Yes' : 'No'}`);
+}
+
+function printClusterAgents(status) {
+  console.log(`\nAgents:`);
+  for (const agent of status.agents) {
+    printClusterAgent(agent);
+  }
+  console.log('');
+}
+
+function printClusterStatusHuman(status, tokensByRole, clusterId) {
+  printClusterStatusHeader(status, clusterId);
+  printClusterTokenUsage(tokensByRole);
+  printClusterAgents(status);
+}
+
+async function tryGetTaskStatusData(getStatusData, id) {
+  if (typeof getStatusData !== 'function') {
+    return null;
+  }
+  try {
+    return await getStatusData(id);
+  } catch {
+    return null;
+  }
+}
+
+async function showTaskStatus(id, options) {
+  const { showStatus, getStatusData } = await import('../task-lib/commands/status.js');
+  if (options.json) {
+    const taskData = await tryGetTaskStatusData(getStatusData, id);
+    console.log(JSON.stringify({ type: 'task', id, ...taskData }, null, 2));
+    return;
+  }
+  await showStatus(id);
+}
+
 // Lazy-loaded orchestrator (quiet by default) - created on first use
 /** @type {import('../src/orchestrator') | null} */
 let _orchestrator = null;
@@ -1296,120 +1421,23 @@ program
       const type = detectIdType(id);
 
       if (!type) {
-        if (options.json) {
-          console.log(JSON.stringify({ error: 'ID not found', id }, null, 2));
-        } else {
-          console.error(`ID not found: ${id}`);
-          console.error('Not found in tasks or clusters');
-        }
-        process.exit(1);
+        reportMissingId(id, options);
+        return;
       }
 
       if (type === 'cluster') {
-        // Show cluster status
-        const status = (await getOrchestrator()).getStatus(id);
-
-        // Get token usage
-        let tokensByRole = null;
-        try {
-          const cluster = (await getOrchestrator()).getCluster(id);
-          if (cluster?.messageBus) {
-            tokensByRole = cluster.messageBus.getTokensByRole(id);
-          }
-        } catch {
-          /* Token tracking not available */
-        }
-
-        // JSON output mode
+        const orchestrator = await getOrchestrator();
+        const status = orchestrator.getStatus(id);
+        const tokensByRole = getClusterTokensByRole(orchestrator, id);
         if (options.json) {
-          console.log(
-            JSON.stringify(
-              {
-                type: 'cluster',
-                ...status,
-                createdAtISO: new Date(status.createdAt).toISOString(),
-                tokensByRole,
-              },
-              null,
-              2
-            )
-          );
+          printClusterStatusJson(status, tokensByRole);
           return;
         }
-
-        // Human-readable output
-        console.log(`\nCluster: ${status.id}`);
-        if (status.isZombie) {
-          console.log(
-            chalk.red(
-              `State: ${status.state} (process ${status.pid} died, cluster has no backing process)`
-            )
-          );
-          console.log(
-            chalk.yellow(
-              `  → Run 'zeroshot kill ${id}' to clean up, or 'zeroshot resume ${id}' to restart`
-            )
-          );
-        } else {
-          console.log(`State: ${status.state}`);
-        }
-        if (status.pid) {
-          console.log(`PID: ${status.pid}`);
-        }
-        console.log(`Created: ${new Date(status.createdAt).toLocaleString()}`);
-        console.log(`Messages: ${status.messageCount}`);
-
-        // Show token usage if available
-        if (tokensByRole) {
-          const tokenLines = formatTokenUsage(tokensByRole);
-          if (tokenLines) {
-            console.log('');
-            for (const line of tokenLines) {
-              console.log(line);
-            }
-          }
-        }
-
-        console.log(`\nAgents:`);
-
-        for (const agent of status.agents) {
-          // Check if subcluster
-          if (agent.type === 'subcluster') {
-            console.log(`  - ${agent.id} (${agent.role}) [SubCluster]`);
-            console.log(`    State: ${agent.state}`);
-            console.log(`    Iteration: ${agent.iteration}`);
-            console.log(`    Child Cluster: ${agent.childClusterId || 'none'}`);
-            console.log(`    Child Running: ${agent.childRunning ? 'Yes' : 'No'}`);
-          } else {
-            const modelLabel = agent.model ? ` [${agent.model}]` : '';
-            console.log(`  - ${agent.id} (${agent.role})${modelLabel}`);
-            console.log(`    State: ${agent.state}`);
-            console.log(`    Iteration: ${agent.iteration}`);
-            console.log(`    Running task: ${agent.currentTask ? 'Yes' : 'No'}`);
-          }
-        }
-
-        console.log('');
-      } else {
-        // Show task status
-        const { showStatus, getStatusData } = await import('../task-lib/commands/status.js');
-
-        if (options.json) {
-          // Try to get JSON data if available
-          let taskData = null;
-          try {
-            if (typeof getStatusData === 'function') {
-              taskData = await getStatusData(id);
-            }
-          } catch {
-            /* Not available */
-          }
-          console.log(JSON.stringify({ type: 'task', id, ...taskData }, null, 2));
-          return;
-        }
-
-        await showStatus(id);
+        printClusterStatusHuman(status, tokensByRole, id);
+        return;
       }
+
+      await showTaskStatus(id, options);
     } catch (error) {
       if (options.json) {
         console.log(JSON.stringify({ error: error.message }, null, 2));
