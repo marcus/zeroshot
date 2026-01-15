@@ -1395,284 +1395,303 @@ class Orchestrator {
       );
     }
 
-    // Get failure info - either from saved state or from ledger
-    let failureInfo = cluster.failureInfo;
+    const failureInfo = this._resolveFailureInfo(cluster, clusterId);
 
-    if (!failureInfo) {
-      // Query ledger for AGENT_ERROR messages to find failed agent
-      const errors = cluster.messageBus.query({
-        cluster_id: clusterId,
-        topic: 'AGENT_ERROR',
-        limit: 10,
-        order: 'desc',
-      });
+    await this._ensureIsolationForResume(clusterId, cluster);
+    this._ensureWorktreeForResume(clusterId, cluster);
+    await this._restartClusterAgents(cluster);
 
-      if (errors.length > 0) {
-        // Use the first error found
-        const firstError = errors[0];
-        failureInfo = {
-          agentId: firstError.sender,
-          taskId: firstError.content?.data?.taskId || null,
-          iteration: firstError.content?.data?.iteration || 0,
-          error: firstError.content?.data?.error || firstError.content?.text,
-          timestamp: firstError.timestamp,
-        };
-        this._log(`[Orchestrator] Found failure from ledger: ${failureInfo.agentId}`);
+    const recentMessages = this._loadRecentMessages(cluster, clusterId, 50);
+
+    if (failureInfo) {
+      return this._resumeFailedCluster(clusterId, cluster, failureInfo, recentMessages, prompt);
+    }
+
+    return this._resumeCleanCluster(clusterId, cluster, recentMessages, prompt);
+  }
+
+  _resolveFailureInfo(cluster, clusterId) {
+    if (cluster.failureInfo) {
+      return cluster.failureInfo;
+    }
+
+    const errors = cluster.messageBus.query({
+      cluster_id: clusterId,
+      topic: 'AGENT_ERROR',
+      limit: 10,
+      order: 'desc',
+    });
+
+    if (errors.length === 0) {
+      return null;
+    }
+
+    const firstError = errors[0];
+    const failureInfo = {
+      agentId: firstError.sender,
+      taskId: firstError.content?.data?.taskId || null,
+      iteration: firstError.content?.data?.iteration || 0,
+      error: firstError.content?.data?.error || firstError.content?.text,
+      timestamp: firstError.timestamp,
+    };
+    this._log(`[Orchestrator] Found failure from ledger: ${failureInfo.agentId}`);
+    return failureInfo;
+  }
+
+  _checkContainerExists(containerId) {
+    const { spawn } = require('child_process');
+    const checkContainer = spawn('docker', ['inspect', containerId], { stdio: 'ignore' });
+    return new Promise((resolve) => {
+      checkContainer.on('close', (code) => resolve(code === 0));
+    });
+  }
+
+  async _ensureIsolationForResume(clusterId, cluster) {
+    if (!cluster.isolation?.enabled) {
+      return;
+    }
+
+    const oldContainerId = cluster.isolation.containerId;
+    const containerExists = await this._checkContainerExists(oldContainerId);
+    if (containerExists) {
+      this._log(`[Orchestrator] Container ${oldContainerId} still exists, reusing`);
+      return;
+    }
+
+    this._log(`[Orchestrator] Container ${oldContainerId} not found, recreating...`);
+
+    const workDir = cluster.isolation.workDir;
+    if (!workDir) {
+      throw new Error(`Cannot resume cluster ${clusterId}: workDir not saved in isolation state`);
+    }
+
+    const isolatedPath = path.join(os.tmpdir(), 'zeroshot-isolated', clusterId);
+    if (!fs.existsSync(isolatedPath)) {
+      throw new Error(
+        `Cannot resume cluster ${clusterId}: isolated workspace deleted. ` +
+          `Was the cluster killed (not stopped)? Use 'zeroshot run' to start fresh.`
+      );
+    }
+
+    const providerName = normalizeProviderName(
+      cluster.config?.forceProvider ||
+        cluster.config?.defaultProvider ||
+        loadSettings().defaultProvider ||
+        'claude'
+    );
+    const newContainerId = await cluster.isolation.manager.createContainer(clusterId, {
+      workDir,
+      image: cluster.isolation.image,
+      reuseExistingWorkspace: true,
+      provider: providerName,
+    });
+
+    this._log(`[Orchestrator] New container created: ${newContainerId}`);
+    cluster.isolation.containerId = newContainerId;
+
+    for (const agent of cluster.agents) {
+      if (agent.isolation?.enabled) {
+        agent.isolation.containerId = newContainerId;
+        agent.isolation.manager = cluster.isolation.manager;
       }
     }
 
-    // CRITICAL: Recreate isolation container if needed
-    if (cluster.isolation?.enabled) {
-      const { spawn } = require('child_process');
-      const oldContainerId = cluster.isolation.containerId;
+    this._log(`[Orchestrator] All agents updated with new container ID`);
+  }
 
-      // Check if container exists
-      const checkContainer = spawn('docker', ['inspect', oldContainerId], {
-        stdio: 'ignore',
-      });
-      const containerExists = await new Promise((resolve) => {
-        checkContainer.on('close', (code) => resolve(code === 0));
-      });
-
-      if (!containerExists) {
-        this._log(`[Orchestrator] Container ${oldContainerId} not found, recreating...`);
-
-        // Create new container using saved workDir (CRITICAL for isolation mode resume)
-        // The isolated workspace at /tmp/zeroshot-isolated/{clusterId} was preserved by stop()
-        const workDir = cluster.isolation.workDir;
-        if (!workDir) {
-          throw new Error(
-            `Cannot resume cluster ${clusterId}: workDir not saved in isolation state`
-          );
-        }
-
-        // Check if isolated workspace still exists (it should, if stop() was used)
-        const isolatedPath = path.join(os.tmpdir(), 'zeroshot-isolated', clusterId);
-        if (!fs.existsSync(isolatedPath)) {
-          throw new Error(
-            `Cannot resume cluster ${clusterId}: isolated workspace deleted. ` +
-              `Was the cluster killed (not stopped)? Use 'zeroshot run' to start fresh.`
-          );
-        }
-
-        const providerName = normalizeProviderName(
-          cluster.config?.forceProvider ||
-            cluster.config?.defaultProvider ||
-            loadSettings().defaultProvider ||
-            'claude'
-        );
-        const newContainerId = await cluster.isolation.manager.createContainer(clusterId, {
-          workDir, // Use saved workDir, NOT process.cwd()
-          image: cluster.isolation.image,
-          reuseExistingWorkspace: true, // CRITICAL: Don't wipe existing work
-          provider: providerName,
-        });
-
-        this._log(`[Orchestrator] New container created: ${newContainerId}`);
-
-        // Update cluster isolation state
-        cluster.isolation.containerId = newContainerId;
-
-        // CRITICAL: Update all agents' isolation context with new container ID
-        for (const agent of cluster.agents) {
-          if (agent.isolation?.enabled) {
-            agent.isolation.containerId = newContainerId;
-            agent.isolation.manager = cluster.isolation.manager;
-          }
-        }
-
-        this._log(`[Orchestrator] All agents updated with new container ID`);
-      } else {
-        this._log(`[Orchestrator] Container ${oldContainerId} still exists, reusing`);
-      }
+  _ensureWorktreeForResume(clusterId, cluster) {
+    if (!cluster.worktree?.enabled) {
+      return;
     }
 
-    // Verify worktree still exists for worktree isolation mode
-    if (cluster.worktree?.enabled) {
-      const worktreePath = cluster.worktree.path;
-      if (!fs.existsSync(worktreePath)) {
-        throw new Error(
-          `Cannot resume cluster ${clusterId}: worktree at ${worktreePath} no longer exists. ` +
-            `Was the worktree manually removed? Use 'zeroshot run' to start fresh.`
-        );
-      }
-
-      this._log(`[Orchestrator] Worktree at ${worktreePath} exists, reusing`);
-      this._log(`[Orchestrator] Branch: ${cluster.worktree.branch}`);
+    const worktreePath = cluster.worktree.path;
+    if (!fs.existsSync(worktreePath)) {
+      throw new Error(
+        `Cannot resume cluster ${clusterId}: worktree at ${worktreePath} no longer exists. ` +
+          `Was the worktree manually removed? Use 'zeroshot run' to start fresh.`
+      );
     }
 
-    // Restart all agents
+    this._log(`[Orchestrator] Worktree at ${worktreePath} exists, reusing`);
+    this._log(`[Orchestrator] Branch: ${cluster.worktree.branch}`);
+  }
+
+  async _restartClusterAgents(cluster) {
     cluster.state = 'running';
     for (const agent of cluster.agents) {
       if (!agent.running) {
         await agent.start();
       }
     }
+  }
 
-    // Query recent messages from ledger to provide context
-    const recentMessages = cluster.messageBus
+  _loadRecentMessages(cluster, clusterId, limit) {
+    return cluster.messageBus
       .query({
         cluster_id: clusterId,
-        limit: 50,
+        limit,
         order: 'desc',
       })
       .reverse();
+  }
 
-    // CASE 1: Failed cluster - Resume the failed agent with error context
-    if (failureInfo) {
-      const { agentId, iteration, error } = failureInfo;
-      this._log(
-        `[Orchestrator] Resuming failed cluster ${clusterId} from agent ${agentId} iteration ${iteration}`
-      );
-      this._log(`[Orchestrator] Previous error: ${error}`);
+  _buildResumeContext(recentMessages, prompt, options) {
+    const resumePrompt = prompt || 'Continue from where you left off. Complete the task.';
+    let context = `${options.header}\n\n`;
 
-      // Find the failed agent
-      const failedAgent = cluster.agents.find((a) => a.id === agentId);
-      if (!failedAgent) {
-        throw new Error(`Failed agent '${agentId}' not found in cluster`);
-      }
-
-      // Build failure resume context
-      const resumePrompt = prompt || 'Continue from where you left off. Complete the task.';
-      let context = `You are resuming from a previous failed attempt.\n\n`;
-      context += `Previous error: ${error}\n\n`;
-      context += `## Recent Context\n\n`;
-
-      for (const msg of recentMessages.slice(-10)) {
-        if (msg.topic === 'AGENT_OUTPUT' || msg.topic === 'VALIDATION_RESULT') {
-          context += `[${msg.sender}] ${msg.content?.text?.slice(0, 200) || ''}\n`;
-        }
-      }
-
-      context += `\n## Resume Instructions\n\n${resumePrompt}\n`;
-
-      // Clear failure info since we're resuming
-      cluster.failureInfo = null;
-
-      // Save updated state
-      await this._saveClusters();
-
-      // Resume the failed agent
-      failedAgent.resume(context).catch((err) => {
-        console.error(`[Orchestrator] Resume failed for agent ${agentId}:`, err.message);
-      });
-
-      this._log(`[Orchestrator] Cluster ${clusterId} resumed from failure`);
-
-      return {
-        id: clusterId,
-        state: cluster.state,
-        resumeType: 'failure',
-        resumedAgent: agentId,
-        previousError: error,
-      };
+    if (options.error) {
+      context += `Previous error: ${options.error}\n\n`;
     }
 
-    // CASE 2: Cleanly stopped cluster - Resume by re-triggering based on ledger state
-    this._log(`[Orchestrator] Resuming stopped cluster ${clusterId} (no failure)`);
-
-    // Build generic resume context
-    const resumePrompt = prompt || 'Continue from where you left off. Complete the task.';
-    let context = `Resuming cluster from previous session.\n\n`;
     context += `## Recent Context\n\n`;
-
     for (const msg of recentMessages.slice(-10)) {
-      if (
-        msg.topic === 'AGENT_OUTPUT' ||
-        msg.topic === 'VALIDATION_RESULT' ||
-        msg.topic === 'ISSUE_OPENED'
-      ) {
+      if (options.topics.includes(msg.topic)) {
         context += `[${msg.sender}] ${msg.content?.text?.slice(0, 200) || ''}\n`;
       }
     }
 
     context += `\n## Resume Instructions\n\n${resumePrompt}\n`;
+    return context;
+  }
 
-    // Find the LAST workflow trigger - not arbitrary last 5 messages
-    // This is the message that indicates current workflow state
-    const lastTrigger = this._findLastWorkflowTrigger(recentMessages);
+  _triggerMatchesTopic(triggerTopic, topic) {
+    if (triggerTopic === topic) return true;
+    if (triggerTopic === '*') return true;
+    if (triggerTopic.endsWith('*')) {
+      const prefix = triggerTopic.slice(0, -1);
+      return topic.startsWith(prefix);
+    }
+    return false;
+  }
+
+  _selectAgentsToResume(cluster, lastTrigger) {
     const agentsToResume = [];
 
+    for (const agent of cluster.agents) {
+      if (!agent.config.triggers) continue;
+
+      const matchingTrigger = agent.config.triggers.find((trigger) =>
+        this._triggerMatchesTopic(trigger.topic, lastTrigger.topic)
+      );
+      if (!matchingTrigger) continue;
+
+      if (matchingTrigger.logic?.script) {
+        const shouldTrigger = agent._evaluateTrigger(matchingTrigger, lastTrigger);
+        if (!shouldTrigger) continue;
+      }
+
+      agentsToResume.push({ agent, message: lastTrigger, trigger: matchingTrigger });
+    }
+
+    return agentsToResume;
+  }
+
+  _resumeAgents(agentsToResume, context) {
+    for (const { agent, message } of agentsToResume) {
+      this._log(`[Orchestrator] - Resuming agent ${agent.id} (triggered by ${message.topic})`);
+      agent.resume(context).catch((err) => {
+        console.error(`[Orchestrator] Resume failed for agent ${agent.id}:`, err.message);
+      });
+    }
+  }
+
+  _republishIssue(cluster, clusterId, recentMessages) {
+    const issueMessage = recentMessages.find((m) => m.topic === 'ISSUE_OPENED');
+    if (!issueMessage) {
+      return false;
+    }
+
+    cluster.messageBus.publish({
+      cluster_id: clusterId,
+      topic: 'ISSUE_OPENED',
+      sender: 'system',
+      receiver: 'broadcast',
+      content: issueMessage.content,
+      metadata: { _resumed: true, _originalId: issueMessage.id },
+    });
+
+    return true;
+  }
+
+  async _resumeFailedCluster(clusterId, cluster, failureInfo, recentMessages, prompt) {
+    const { agentId, iteration, error } = failureInfo;
+    this._log(
+      `[Orchestrator] Resuming failed cluster ${clusterId} from agent ${agentId} iteration ${iteration}`
+    );
+    this._log(`[Orchestrator] Previous error: ${error}`);
+
+    const failedAgent = cluster.agents.find((agent) => agent.id === agentId);
+    if (!failedAgent) {
+      throw new Error(`Failed agent '${agentId}' not found in cluster`);
+    }
+
+    const context = this._buildResumeContext(recentMessages, prompt, {
+      header: 'You are resuming from a previous failed attempt.',
+      error,
+      topics: ['AGENT_OUTPUT', 'VALIDATION_RESULT'],
+    });
+
+    cluster.failureInfo = null;
+    await this._saveClusters();
+
+    failedAgent.resume(context).catch((err) => {
+      console.error(`[Orchestrator] Resume failed for agent ${agentId}:`, err.message);
+    });
+
+    this._log(`[Orchestrator] Cluster ${clusterId} resumed from failure`);
+
+    return {
+      id: clusterId,
+      state: cluster.state,
+      resumeType: 'failure',
+      resumedAgent: agentId,
+      previousError: error,
+    };
+  }
+
+  async _resumeCleanCluster(clusterId, cluster, recentMessages, prompt) {
+    this._log(`[Orchestrator] Resuming stopped cluster ${clusterId} (no failure)`);
+
+    const context = this._buildResumeContext(recentMessages, prompt, {
+      header: 'Resuming cluster from previous session.',
+      topics: ['AGENT_OUTPUT', 'VALIDATION_RESULT', 'ISSUE_OPENED'],
+    });
+
+    const lastTrigger = this._findLastWorkflowTrigger(recentMessages);
     if (lastTrigger) {
       this._log(
         `[Orchestrator] Last workflow trigger: ${lastTrigger.topic} (${new Date(lastTrigger.timestamp).toISOString()})`
       );
-
-      for (const agent of cluster.agents) {
-        if (!agent.config.triggers) continue;
-
-        const matchingTrigger = agent.config.triggers.find((trigger) => {
-          // Exact match
-          if (trigger.topic === lastTrigger.topic) return true;
-          // Wildcard match
-          if (trigger.topic === '*') return true;
-          // Prefix match (e.g., "VALIDATION_*")
-          if (trigger.topic.endsWith('*')) {
-            const prefix = trigger.topic.slice(0, -1);
-            return lastTrigger.topic.startsWith(prefix);
-          }
-          return false;
-        });
-
-        if (matchingTrigger) {
-          // Evaluate logic script if present
-          if (matchingTrigger.logic?.script) {
-            const shouldTrigger = agent._evaluateTrigger(matchingTrigger, lastTrigger);
-            if (!shouldTrigger) continue;
-          }
-          agentsToResume.push({ agent, message: lastTrigger, trigger: matchingTrigger });
-        }
-      }
     } else {
       this._log(`[Orchestrator] No workflow triggers found in ledger`);
     }
 
+    const agentsToResume = lastTrigger ? this._selectAgentsToResume(cluster, lastTrigger) : [];
     if (agentsToResume.length === 0) {
       if (!lastTrigger) {
-        // No workflow activity - cluster never really started
         this._log(
           `[Orchestrator] WARNING: No workflow triggers in ledger. Cluster may not have started properly.`
         );
         this._log(`[Orchestrator] Publishing ISSUE_OPENED to bootstrap workflow...`);
 
-        // Re-publish the original issue if we have it
-        const issueMessage = recentMessages.find((m) => m.topic === 'ISSUE_OPENED');
-        if (issueMessage) {
-          cluster.messageBus.publish({
-            cluster_id: clusterId,
-            topic: 'ISSUE_OPENED',
-            sender: 'system',
-            receiver: 'broadcast',
-            content: issueMessage.content,
-            metadata: { _resumed: true, _originalId: issueMessage.id },
-          });
-        } else {
+        if (!this._republishIssue(cluster, clusterId, recentMessages)) {
           throw new Error(
             `Cannot resume cluster ${clusterId}: No workflow triggers found and no ISSUE_OPENED message. ` +
               `The cluster may not have started properly. Try: zeroshot run <issue> instead.`
           );
         }
       } else {
-        // Had a trigger but no agents matched - something is wrong with agent configs
         throw new Error(
           `Cannot resume cluster ${clusterId}: Found trigger ${lastTrigger.topic} but no agents handle it. ` +
             `Check agent trigger configurations.`
         );
       }
     } else {
-      // Resume agents that should run based on ledger state
       this._log(`[Orchestrator] Resuming ${agentsToResume.length} agent(s) based on ledger state`);
-      for (const { agent, message } of agentsToResume) {
-        this._log(`[Orchestrator] - Resuming agent ${agent.id} (triggered by ${message.topic})`);
-        agent.resume(context).catch((err) => {
-          console.error(`[Orchestrator] Resume failed for agent ${agent.id}:`, err.message);
-        });
-      }
+      this._resumeAgents(agentsToResume, context);
     }
 
-    // Save updated state
     await this._saveClusters();
-
     this._log(`[Orchestrator] Cluster ${clusterId} resumed`);
 
     return {
