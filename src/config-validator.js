@@ -1127,6 +1127,66 @@ function validateRuleCoverage(config) {
     return { errors, warnings };
   }
 
+  const applyIterationPattern = (coveredIterations, pattern, maxIterations) => {
+    if (!pattern) return;
+
+    if (pattern === 'all') {
+      for (let i = 1; i <= maxIterations; i++) {
+        coveredIterations.add(i);
+      }
+      return;
+    }
+
+    if (/^\d+$/.test(pattern)) {
+      coveredIterations.add(parseInt(pattern, 10));
+      return;
+    }
+
+    if (/^\d+-\d+$/.test(pattern)) {
+      const [start, end] = pattern.split('-').map((n) => parseInt(n, 10));
+      for (let i = start; i <= end; i++) {
+        coveredIterations.add(i);
+      }
+      return;
+    }
+
+    if (/^\d+\+$/.test(pattern)) {
+      const start = parseInt(pattern, 10);
+      for (let i = start; i <= maxIterations; i++) {
+        coveredIterations.add(i);
+      }
+    }
+  };
+
+  const collectCoverage = (rules, maxIterations) => {
+    const coveredIterations = new Set();
+    for (const rule of rules) {
+      applyIterationPattern(coveredIterations, rule.iterations, maxIterations);
+    }
+    return coveredIterations;
+  };
+
+  const findUncoveredIterations = (coveredIterations, maxIterations) => {
+    const uncoveredIterations = [];
+    for (let i = 1; i <= maxIterations; i++) {
+      if (!coveredIterations.has(i)) {
+        uncoveredIterations.push(i);
+      }
+    }
+    return uncoveredIterations;
+  };
+
+  const reportCoverageGap = (agent, gapNumber, label, fixHint, uncoveredIterations) => {
+    if (uncoveredIterations.length === 0) {
+      return;
+    }
+    const ranges = groupConsecutive(uncoveredIterations);
+    errors.push(
+      `[Gap ${gapNumber}] Agent '${agent.id}': ${label} have gaps at iterations ${ranges.join(', ')}. ` +
+        `Fix: ${fixHint}`
+    );
+  };
+
   for (const agent of config.agents) {
     if (agent.type === 'subcluster') {
       continue;
@@ -1137,50 +1197,15 @@ function validateRuleCoverage(config) {
     // === GAP 4: Model rule iteration gaps ===
     // Causes runtime crash at agent-wrapper.js:154
     if (agent.modelRules && Array.isArray(agent.modelRules)) {
-      const coveredIterations = new Set();
-
-      for (const rule of agent.modelRules) {
-        const pattern = rule.iterations;
-
-        if (pattern === 'all') {
-          // Covers all iterations
-          for (let i = 1; i <= maxIterations; i++) {
-            coveredIterations.add(i);
-          }
-        } else if (/^\d+$/.test(pattern)) {
-          // Single iteration: "5"
-          coveredIterations.add(parseInt(pattern));
-        } else if (/^\d+-\d+$/.test(pattern)) {
-          // Range: "1-3"
-          const [start, end] = pattern.split('-').map((n) => parseInt(n));
-          for (let i = start; i <= end; i++) {
-            coveredIterations.add(i);
-          }
-        } else if (/^\d+\+$/.test(pattern)) {
-          // Open-ended: "5+"
-          const start = parseInt(pattern);
-          for (let i = start; i <= maxIterations; i++) {
-            coveredIterations.add(i);
-          }
-        }
-      }
-
-      // Find gaps
-      const uncoveredIterations = [];
-      for (let i = 1; i <= maxIterations; i++) {
-        if (!coveredIterations.has(i)) {
-          uncoveredIterations.push(i);
-        }
-      }
-
-      if (uncoveredIterations.length > 0) {
-        // Group consecutive iterations for readability
-        const ranges = groupConsecutive(uncoveredIterations);
-        errors.push(
-          `[Gap 4] Agent '${agent.id}': Model rules have gaps at iterations ${ranges.join(', ')}. ` +
-            `Fix: Add catch-all rule { "iterations": "all", "model": "sonnet" } or extend existing ranges.`
-        );
-      }
+      const coveredIterations = collectCoverage(agent.modelRules, maxIterations);
+      const uncoveredIterations = findUncoveredIterations(coveredIterations, maxIterations);
+      reportCoverageGap(
+        agent,
+        4,
+        'Model rules',
+        'Add catch-all rule { "iterations": "all", "model": "sonnet" } or extend existing ranges.',
+        uncoveredIterations
+      );
     }
 
     // === GAP 5: Prompt rule iteration gaps ===
@@ -1191,44 +1216,15 @@ function validateRuleCoverage(config) {
       agent.promptConfig.rules &&
       Array.isArray(agent.promptConfig.rules)
     ) {
-      const coveredIterations = new Set();
-
-      for (const rule of agent.promptConfig.rules) {
-        const pattern = rule.iterations;
-
-        if (pattern === 'all') {
-          for (let i = 1; i <= maxIterations; i++) {
-            coveredIterations.add(i);
-          }
-        } else if (/^\d+$/.test(pattern)) {
-          coveredIterations.add(parseInt(pattern));
-        } else if (/^\d+-\d+$/.test(pattern)) {
-          const [start, end] = pattern.split('-').map((n) => parseInt(n));
-          for (let i = start; i <= end; i++) {
-            coveredIterations.add(i);
-          }
-        } else if (/^\d+\+$/.test(pattern)) {
-          const start = parseInt(pattern);
-          for (let i = start; i <= maxIterations; i++) {
-            coveredIterations.add(i);
-          }
-        }
-      }
-
-      const uncoveredIterations = [];
-      for (let i = 1; i <= maxIterations; i++) {
-        if (!coveredIterations.has(i)) {
-          uncoveredIterations.push(i);
-        }
-      }
-
-      if (uncoveredIterations.length > 0) {
-        const ranges = groupConsecutive(uncoveredIterations);
-        errors.push(
-          `[Gap 5] Agent '${agent.id}': Prompt rules have gaps at iterations ${ranges.join(', ')}. ` +
-            `Fix: Add catch-all rule { "iterations": "all", "prompt": "..." } or extend existing ranges.`
-        );
-      }
+      const coveredIterations = collectCoverage(agent.promptConfig.rules, maxIterations);
+      const uncoveredIterations = findUncoveredIterations(coveredIterations, maxIterations);
+      reportCoverageGap(
+        agent,
+        5,
+        'Prompt rules',
+        'Add catch-all rule { "iterations": "all", "prompt": "..." } or extend existing ranges.',
+        uncoveredIterations
+      );
     }
   }
 
