@@ -977,6 +977,93 @@ function formatValidationResult(result) {
  * @param {Object} config - Cluster configuration
  * @returns {{ errors: string[], warnings: string[] }}
  */
+function validateHookAction(hook, prefix, errors) {
+  if (!hook.action) {
+    errors.push(
+      `[Gap 1] ${prefix}: Missing 'action' field. ` +
+        `Fix: Add "action": "publish_message" or "action": "execute_system_command"`
+    );
+  }
+}
+
+function validateTransformScript(hook, prefix, errors) {
+  if (!hook.transform?.script) {
+    return;
+  }
+
+  const script = hook.transform.script;
+  const hasReturnTopic = /return\s*\{[^}]*topic\s*:/i.test(script);
+  const hasReturnContent = /return\s*\{[^}]*content\s*:/i.test(script);
+
+  if (!hasReturnTopic) {
+    errors.push(
+      `[Gap 2] ${prefix}: Transform script must return object with 'topic' property. ` +
+        `Fix: return { topic: "TOPIC_NAME", content: {...} }`
+    );
+  }
+
+  if (!hasReturnContent) {
+    errors.push(
+      `[Gap 2] ${prefix}: Transform script must return object with 'content' property. ` +
+        `Fix: return { topic: "...", content: { data: result } }`
+    );
+  }
+}
+
+function validateConductorOperations(agent, hook, prefix, errors) {
+  const targetsClusterOperations =
+    hook.config?.topic === 'CLUSTER_OPERATIONS' ||
+    hook.transform?.script?.includes('CLUSTER_OPERATIONS');
+
+  if (agent.role !== 'conductor' || !targetsClusterOperations) {
+    return;
+  }
+
+  if (!hook.transform?.script) {
+    return;
+  }
+
+  const script = hook.transform.script;
+  const hasOperations = /operations\s*:/i.test(script);
+  if (!hasOperations) {
+    errors.push(
+      `[Gap 7] ${prefix}: CLUSTER_OPERATIONS message must include 'operations' field. ` +
+        `Fix: return { topic: "CLUSTER_OPERATIONS", content: { data: { operations: JSON.stringify([...]) } } }`
+    );
+  }
+}
+
+function validateHookLogic(hook, prefix, errors) {
+  if (!hook.logic) {
+    return;
+  }
+
+  if (hook.logic.engine && hook.logic.engine !== 'javascript') {
+    errors.push(`${prefix}: Hook logic engine must be 'javascript', got: '${hook.logic.engine}'`);
+  }
+
+  if (!hook.logic.script) {
+    errors.push(`${prefix}: Hook logic must have a 'script' property`);
+  } else if (typeof hook.logic.script !== 'string') {
+    errors.push(`${prefix}: Hook logic script must be a string`);
+  } else {
+    try {
+      const vm = require('vm');
+      const wrappedScript = `(function() { 'use strict'; ${hook.logic.script} })()`;
+      new vm.Script(wrappedScript);
+    } catch (syntaxError) {
+      errors.push(`${prefix}: Hook logic script has syntax error: ${syntaxError.message}`);
+    }
+  }
+
+  if (!hook.config && !hook.transform) {
+    errors.push(
+      `${prefix}: Hook with logic block must also have 'config' or 'transform'. ` +
+        `Logic provides overrides, not the full message.`
+    );
+  }
+}
+
 function validateHookSemantics(config) {
   const errors = [];
   const warnings = [];
@@ -1002,91 +1089,19 @@ function validateHookSemantics(config) {
 
       // === GAP 1: Hook action field missing ===
       // Causes runtime crash at agent-hook-executor.js:66
-      if (!hook.action) {
-        errors.push(
-          `[Gap 1] ${prefix}: Missing 'action' field. ` +
-            `Fix: Add "action": "publish_message" or "action": "execute_system_command"`
-        );
-      }
+      validateHookAction(hook, prefix, errors);
 
       // === GAP 2: Transform script output shape validation ===
       // Causes runtime crash at agent-hook-executor.js:148
-      if (hook.transform?.script) {
-        const script = hook.transform.script;
-
-        // Check if script returns an object with topic and content
-        // Simple heuristic: look for return statement with object
-        const hasReturnTopic = /return\s*\{[^}]*topic\s*:/i.test(script);
-        const hasReturnContent = /return\s*\{[^}]*content\s*:/i.test(script);
-
-        if (!hasReturnTopic) {
-          errors.push(
-            `[Gap 2] ${prefix}: Transform script must return object with 'topic' property. ` +
-              `Fix: return { topic: "TOPIC_NAME", content: {...} }`
-          );
-        }
-
-        if (!hasReturnContent) {
-          errors.push(
-            `[Gap 2] ${prefix}: Transform script must return object with 'content' property. ` +
-              `Fix: return { topic: "...", content: { data: result } }`
-          );
-        }
-      }
+      validateTransformScript(hook, prefix, errors);
 
       // === GAP 7: CLUSTER_OPERATIONS payload validation ===
       // Causes runtime crash at orchestrator.js:722
-      if (
-        agent.role === 'conductor' &&
-        (hook.config?.topic === 'CLUSTER_OPERATIONS' ||
-          hook.transform?.script?.includes('CLUSTER_OPERATIONS'))
-      ) {
-        // Check if operations field is valid JSON structure
-        if (hook.transform?.script) {
-          const script = hook.transform.script;
-          // Look for operations field in return statement
-          const hasOperations = /operations\s*:/i.test(script);
-          if (!hasOperations) {
-            errors.push(
-              `[Gap 7] ${prefix}: CLUSTER_OPERATIONS message must include 'operations' field. ` +
-                `Fix: return { topic: "CLUSTER_OPERATIONS", content: { data: { operations: JSON.stringify([...]) } } }`
-            );
-          }
-        }
-      }
+      validateConductorOperations(agent, hook, prefix, errors);
 
       // === Logic block validation ===
       // Logic blocks allow conditional config overrides (like trigger logic)
-      if (hook.logic) {
-        if (hook.logic.engine && hook.logic.engine !== 'javascript') {
-          errors.push(
-            `${prefix}: Hook logic engine must be 'javascript', got: '${hook.logic.engine}'`
-          );
-        }
-
-        if (!hook.logic.script) {
-          errors.push(`${prefix}: Hook logic must have a 'script' property`);
-        } else if (typeof hook.logic.script !== 'string') {
-          errors.push(`${prefix}: Hook logic script must be a string`);
-        } else {
-          // Validate script syntax
-          try {
-            const vm = require('vm');
-            const wrappedScript = `(function() { 'use strict'; ${hook.logic.script} })()`;
-            new vm.Script(wrappedScript);
-          } catch (syntaxError) {
-            errors.push(`${prefix}: Hook logic script has syntax error: ${syntaxError.message}`);
-          }
-        }
-
-        // Logic blocks require config (they modify config, not replace it)
-        if (!hook.config && !hook.transform) {
-          errors.push(
-            `${prefix}: Hook with logic block must also have 'config' or 'transform'. ` +
-              `Logic provides overrides, not the full message.`
-          );
-        }
-      }
+      validateHookLogic(hook, prefix, errors);
     }
   }
 
