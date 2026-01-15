@@ -39,6 +39,61 @@ function deepMerge(target, source) {
   return result;
 }
 
+async function parseResultDataForHookLogic({ agent, result }) {
+  if (!result?.output) return null;
+  try {
+    return await agent._parseResultOutput(result.output);
+  } catch (parseError) {
+    agent._log(
+      `⚠️  Hook logic: result parsing failed, continuing with null: ${parseError.message}`
+    );
+    return null;
+  }
+}
+
+async function resolveHookConfigWithLogic({ hook, agent, context, result }) {
+  if (!hook.logic) return hook.config;
+
+  const resultData = await parseResultDataForHookLogic({ agent, result });
+  const overrides = evaluateHookLogic({
+    logic: hook.logic,
+    resultData,
+    agent,
+    context,
+  });
+
+  if (!overrides) {
+    return hook.config;
+  }
+
+  agent._log(`Hook logic returned overrides: ${JSON.stringify(overrides)}`);
+  return deepMerge(hook.config, overrides);
+}
+
+async function resolvePublishMessage({ hook, agent, context, cluster, result }) {
+  if (hook.transform) {
+    return executeTransform({
+      transform: hook.transform,
+      context,
+      agent,
+    });
+  }
+
+  const effectiveConfig = await resolveHookConfigWithLogic({
+    hook,
+    agent,
+    context,
+    result,
+  });
+
+  return substituteTemplate({
+    config: effectiveConfig,
+    context,
+    agent,
+    cluster,
+  });
+}
+
 /**
  * Execute a hook
  * THROWS on failure - no silent errors
@@ -69,66 +124,169 @@ async function executeHook(params) {
 
   // NO try/catch - errors must propagate
   if (hook.action === 'publish_message') {
-    let messageToPublish;
+    const messageToPublish = await resolvePublishMessage({
+      hook,
+      agent,
+      context,
+      cluster,
+      result,
+    });
+    agent._publish(messageToPublish);
+    return;
+  }
 
-    if (hook.transform) {
-      // Transform scripts handle their own logic - no additional processing needed
-      messageToPublish = await executeTransform({
-        transform: hook.transform,
-        context,
-        agent,
-      });
-    } else {
-      // Template-based config - may have logic block for conditional overrides
-      let effectiveConfig = hook.config;
+  if (hook.action === 'execute_system_command') {
+    throw new Error('execute_system_command not implemented');
+  }
 
-      // If hook has logic block, evaluate it to get config overrides
-      if (hook.logic) {
-        // Parse result data for logic evaluation (if available)
-        let resultData = null;
-        if (result?.output) {
-          try {
-            resultData = await agent._parseResultOutput(result.output);
-          } catch (parseError) {
-            // If logic script doesn't use result, parsing failure is OK
-            // If it does use result, evaluateHookLogic will fail appropriately
-            agent._log(
-              `⚠️  Hook logic: result parsing failed, continuing with null: ${parseError.message}`
-            );
-          }
-        }
+  throw new Error(`Unknown hook action: ${hook.action}`);
+}
 
-        // Evaluate logic script
-        const overrides = evaluateHookLogic({
-          logic: hook.logic,
-          resultData,
-          agent,
-          context,
-        });
+function getAccessedFields(script) {
+  return [...script.matchAll(/result\.([a-zA-Z_]+)/g)].map((m) => m[1]);
+}
 
-        // Deep merge overrides into config
-        if (overrides) {
-          agent._log(`Hook logic returned overrides: ${JSON.stringify(overrides)}`);
-          effectiveConfig = deepMerge(hook.config, overrides);
-        }
-      }
+function logTransformParseFailure({ agent, context, parseError }) {
+  const taskId = context.result?.taskId || agent.currentTaskId || 'UNKNOWN';
+  console.error(`\n${'='.repeat(80)}`);
+  console.error(`🔴 TRANSFORM SCRIPT BLOCKED - RESULT PARSING FAILED`);
+  console.error(`${'='.repeat(80)}`);
+  console.error(`Agent: ${agent.id}, Role: ${agent.role}`);
+  console.error(`TaskID: ${taskId}`);
+  console.error(`Parse error: ${parseError.message}`);
+  console.error(`Output (last 500 chars): ${(context.result.output || '').slice(-500)}`);
+  console.error(`${'='.repeat(80)}\n`);
+}
 
-      // Now do template substitution on the (possibly modified) config
-      messageToPublish = await substituteTemplate({
-        config: effectiveConfig,
-        context,
-        agent,
-        cluster,
-      });
+function logMissingResultFields({ agent, context, accessedFields, missingFields, resultData }) {
+  const taskId = context.result?.taskId || agent.currentTaskId || 'UNKNOWN';
+  console.error(`\n${'='.repeat(80)}`);
+  console.error(`🔴 TRANSFORM SCRIPT BLOCKED - MISSING REQUIRED FIELDS`);
+  console.error(`${'='.repeat(80)}`);
+  console.error(`Agent: ${agent.id}, Role: ${agent.role}, TaskID: ${taskId}`);
+  console.error(`Script accesses: ${accessedFields.join(', ')}`);
+  console.error(`Missing from result: ${missingFields.join(', ')}`);
+  console.error(`Result keys: ${Object.keys(resultData).join(', ')}`);
+  console.error(`Result data: ${JSON.stringify(resultData, null, 2)}`);
+  console.error(`${'='.repeat(80)}\n`);
+}
+
+async function parseTransformResultData({ context, agent, script, scriptUsesResult }) {
+  if (context.result?.output) {
+    let resultData = null;
+    try {
+      resultData = await agent._parseResultOutput(context.result.output);
+    } catch (parseError) {
+      logTransformParseFailure({ agent, context, parseError });
+      throw new Error(
+        `Transform script cannot run: result parsing failed. ` +
+          `Agent: ${agent.id}, Error: ${parseError.message}`
+      );
     }
 
-    // Publish via agent's _publish method
-    agent._publish(messageToPublish);
-  } else if (hook.action === 'execute_system_command') {
-    throw new Error('execute_system_command not implemented');
-  } else {
-    throw new Error(`Unknown hook action: ${hook.action}`);
+    const accessedFields = getAccessedFields(script);
+    const missingFields = accessedFields.filter((f) => resultData[f] === undefined);
+    if (missingFields.length > 0) {
+      logMissingResultFields({ agent, context, accessedFields, missingFields, resultData });
+      const taskId = context.result?.taskId || agent.currentTaskId || 'UNKNOWN';
+      throw new Error(
+        `Transform script accesses undefined fields: ${missingFields.join(', ')}. ` +
+          `Agent ${agent.id} (task ${taskId}) output missing required fields. ` +
+          `Check agent's jsonSchema and output format.`
+      );
+    }
+
+    return resultData;
   }
+
+  if (scriptUsesResult) {
+    const taskId = context.result?.taskId || agent.currentTaskId || 'UNKNOWN';
+    const outputLength = (context.result?.output || '').length;
+    throw new Error(
+      `Transform script uses result.* variables but no output was captured. ` +
+        `Agent: ${agent.id}, TaskID: ${taskId}, Iteration: ${agent.iteration}, ` +
+        `Output length: ${outputLength}. ` +
+        `Check that the task completed successfully and the get-log-path command exists.`
+    );
+  }
+
+  return null;
+}
+
+function buildTransformSandbox({ resultData, context, agent }) {
+  const helpers = {
+    getConfig: require('../config-router').getConfig,
+  };
+
+  return {
+    result: resultData,
+    triggeringMessage: context.triggeringMessage,
+    helpers,
+    JSON,
+    console: {
+      log: (...args) => agent._log('[transform]', ...args),
+      error: (...args) => console.error('[transform]', ...args),
+      warn: (...args) => console.warn('[transform]', ...args),
+    },
+  };
+}
+
+function runTransformScript(script, sandbox) {
+  const vmContext = vm.createContext(sandbox);
+  const wrappedScript = `(function() { ${script} })()`;
+
+  try {
+    return vm.runInContext(wrappedScript, vmContext, { timeout: 5000 });
+  } catch (err) {
+    throw new Error(`Transform script error: ${err.message}`);
+  }
+}
+
+function validateTransformResult(result) {
+  if (!result || typeof result !== 'object') {
+    throw new Error(
+      `Transform script must return an object with topic and content, got: ${typeof result}`
+    );
+  }
+  if (!result.topic) {
+    throw new Error(`Transform script result must have a 'topic' property`);
+  }
+  if (!result.content) {
+    throw new Error(`Transform script result must have a 'content' property`);
+  }
+}
+
+function validateClusterOperationsResult(result, agent) {
+  if (result.topic !== 'CLUSTER_OPERATIONS') return;
+
+  const operations = result.content?.data?.operations;
+  if (!operations) {
+    console.error(`\n${'='.repeat(80)}`);
+    console.error(`🔴 CLUSTER_OPERATIONS MALFORMED - MISSING OPERATIONS ARRAY`);
+    console.error(`${'='.repeat(80)}`);
+    console.error(`Agent: ${agent.id}`);
+    console.error(`Result: ${JSON.stringify(result, null, 2)}`);
+    console.error(`${'='.repeat(80)}\n`);
+    throw new Error(
+      `CLUSTER_OPERATIONS message missing operations array. ` +
+        `Agent ${agent.id} transform script returned invalid structure.`
+    );
+  }
+  if (!Array.isArray(operations)) {
+    throw new Error(`CLUSTER_OPERATIONS.operations must be an array, got: ${typeof operations}`);
+  }
+  if (operations.length === 0) {
+    throw new Error(`CLUSTER_OPERATIONS.operations is empty - no operations to execute`);
+  }
+
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i];
+    if (!op || !op.action) {
+      throw new Error(`CLUSTER_OPERATIONS.operations[${i}] missing required 'action' field`);
+    }
+  }
+
+  agent._log(`✅ CLUSTER_OPERATIONS validated: ${operations.length} operations`);
 }
 
 /**
@@ -154,139 +312,18 @@ async function executeTransform(params) {
   // Parse result output if we have a result
   // VALIDATION: Check if script uses result.* variables and fail early if no output
   const scriptUsesResult = /\bresult\.[a-zA-Z]/.test(script);
-  let resultData = null;
+  const resultData = await parseTransformResultData({
+    context,
+    agent,
+    script,
+    scriptUsesResult,
+  });
 
-  if (context.result?.output) {
-    try {
-      resultData = await agent._parseResultOutput(context.result.output);
-    } catch (parseError) {
-      // FAIL FAST: Result parsing failed - don't continue with null data
-      const taskId = context.result?.taskId || agent.currentTaskId || 'UNKNOWN';
-      console.error(`\n${'='.repeat(80)}`);
-      console.error(`🔴 TRANSFORM SCRIPT BLOCKED - RESULT PARSING FAILED`);
-      console.error(`${'='.repeat(80)}`);
-      console.error(`Agent: ${agent.id}, Role: ${agent.role}`);
-      console.error(`TaskID: ${taskId}`);
-      console.error(`Parse error: ${parseError.message}`);
-      console.error(`Output (last 500 chars): ${(context.result.output || '').slice(-500)}`);
-      console.error(`${'='.repeat(80)}\n`);
-      throw new Error(
-        `Transform script cannot run: result parsing failed. ` +
-          `Agent: ${agent.id}, Error: ${parseError.message}`
-      );
-    }
+  const sandbox = buildTransformSandbox({ resultData, context, agent });
+  const result = runTransformScript(script, sandbox);
 
-    // DEFENSIVE: Validate result has expected fields if script accesses them
-    // Extract field names from script (e.g., result.complexity, result.taskType)
-    const accessedFields = [...script.matchAll(/result\.([a-zA-Z_]+)/g)].map((m) => m[1]);
-    const missingFields = accessedFields.filter((f) => resultData[f] === undefined);
-    if (missingFields.length > 0) {
-      const taskId = context.result?.taskId || agent.currentTaskId || 'UNKNOWN';
-      console.error(`\n${'='.repeat(80)}`);
-      console.error(`🔴 TRANSFORM SCRIPT BLOCKED - MISSING REQUIRED FIELDS`);
-      console.error(`${'='.repeat(80)}`);
-      console.error(`Agent: ${agent.id}, Role: ${agent.role}, TaskID: ${taskId}`);
-      console.error(`Script accesses: ${accessedFields.join(', ')}`);
-      console.error(`Missing from result: ${missingFields.join(', ')}`);
-      console.error(`Result keys: ${Object.keys(resultData).join(', ')}`);
-      console.error(`Result data: ${JSON.stringify(resultData, null, 2)}`);
-      console.error(`${'='.repeat(80)}\n`);
-      throw new Error(
-        `Transform script accesses undefined fields: ${missingFields.join(', ')}. ` +
-          `Agent ${agent.id} (task ${taskId}) output missing required fields. ` +
-          `Check agent's jsonSchema and output format.`
-      );
-    }
-  } else if (scriptUsesResult) {
-    const taskId = context.result?.taskId || agent.currentTaskId || 'UNKNOWN';
-    const outputLength = (context.result?.output || '').length;
-    throw new Error(
-      `Transform script uses result.* variables but no output was captured. ` +
-        `Agent: ${agent.id}, TaskID: ${taskId}, Iteration: ${agent.iteration}, ` +
-        `Output length: ${outputLength}. ` +
-        `Check that the task completed successfully and the get-log-path command exists.`
-    );
-  }
-
-  // Helper functions exposed to transform scripts
-  const helpers = {
-    /**
-     * Get cluster config based on complexity and task type
-     * Returns: { base: 'template-name', params: { ... } }
-     */
-    getConfig: require('../config-router').getConfig,
-  };
-
-  // Build sandbox context
-  const sandbox = {
-    result: resultData,
-    triggeringMessage: context.triggeringMessage,
-    helpers,
-    JSON,
-    console: {
-      log: (...args) => agent._log('[transform]', ...args),
-      error: (...args) => console.error('[transform]', ...args),
-      warn: (...args) => console.warn('[transform]', ...args),
-    },
-  };
-
-  // Execute in VM sandbox with timeout
-  const vmContext = vm.createContext(sandbox);
-  const wrappedScript = `(function() { ${script} })()`;
-
-  let result;
-  try {
-    result = vm.runInContext(wrappedScript, vmContext, { timeout: 5000 });
-  } catch (err) {
-    throw new Error(`Transform script error: ${err.message}`);
-  }
-
-  // Validate result
-  if (!result || typeof result !== 'object') {
-    throw new Error(
-      `Transform script must return an object with topic and content, got: ${typeof result}`
-    );
-  }
-  if (!result.topic) {
-    throw new Error(`Transform script result must have a 'topic' property`);
-  }
-  if (!result.content) {
-    throw new Error(`Transform script result must have a 'content' property`);
-  }
-
-  // CRITICAL: Extra validation for CLUSTER_OPERATIONS - this is the make-or-break message
-  // If this message is malformed, the cluster will hang forever
-  if (result.topic === 'CLUSTER_OPERATIONS') {
-    const operations = result.content?.data?.operations;
-    if (!operations) {
-      console.error(`\n${'='.repeat(80)}`);
-      console.error(`🔴 CLUSTER_OPERATIONS MALFORMED - MISSING OPERATIONS ARRAY`);
-      console.error(`${'='.repeat(80)}`);
-      console.error(`Agent: ${agent.id}`);
-      console.error(`Result: ${JSON.stringify(result, null, 2)}`);
-      console.error(`${'='.repeat(80)}\n`);
-      throw new Error(
-        `CLUSTER_OPERATIONS message missing operations array. ` +
-          `Agent ${agent.id} transform script returned invalid structure.`
-      );
-    }
-    if (!Array.isArray(operations)) {
-      throw new Error(`CLUSTER_OPERATIONS.operations must be an array, got: ${typeof operations}`);
-    }
-    if (operations.length === 0) {
-      throw new Error(`CLUSTER_OPERATIONS.operations is empty - no operations to execute`);
-    }
-
-    // Validate each operation has required 'action' field
-    for (let i = 0; i < operations.length; i++) {
-      const op = operations[i];
-      if (!op || !op.action) {
-        throw new Error(`CLUSTER_OPERATIONS.operations[${i}] missing required 'action' field`);
-      }
-    }
-
-    agent._log(`✅ CLUSTER_OPERATIONS validated: ${operations.length} operations`);
-  }
+  validateTransformResult(result);
+  validateClusterOperationsResult(result, agent);
 
   return result;
 }
