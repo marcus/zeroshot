@@ -48,6 +48,9 @@ IS THIS HOW A SENIOR STAFF ARCHITECT WOULD DO IT? ACT LIKE ONE.
 | TUI dashboard            | `src/tui/`                          |
 | Docker mounts/env        | `lib/docker-config.js`              |
 | Container lifecycle      | `src/isolation-manager.js`          |
+| Issue providers          | `src/issue-providers/`              |
+| Git remote detection     | `lib/git-remote-utils.js`           |
+| Input helpers            | `src/input-helpers.js`              |
 | Settings                 | `lib/settings.js`                   |
 
 ## CLI Quick Reference
@@ -83,6 +86,15 @@ zeroshot settings                 # View/modify settings
 - Attach (`zeroshot attach`): Connect to daemon, Ctrl+C **detaches** only
 
 **Settings:** `maxModel` (opus/sonnet/haiku cost ceiling), `defaultConfig`, `logLevel`
+
+**Git Auto-Detection:** Bare numbers (e.g., `123`) automatically detect provider from git remote URL. No configuration needed when working in a git repository.
+
+Priority order for bare numbers:
+
+1. Force flags (`--github`, `--gitlab`, `--devops`) - Explicit CLI override
+2. Git remote detection - Automatic from `git remote get-url origin`
+3. Settings (`defaultIssueSource`) - Global user preference
+4. Legacy fallback - GitHub (only when no git context and no settings)
 
 ## Architecture
 
@@ -337,6 +349,24 @@ const maxValidators = cluster.config.complexity === 'CRITICAL' ? 5 : 3;
 ```
 
 **WHY THIS MATTERS:** Conductor dynamically adjusts based on task complexity.
+
+### 7. Bypassing dev → main Workflow (ENFORCED via CI)
+
+**CI blocks PRs to main from any branch except `dev`.** See `.github/workflows/ci.yml` → `enforce-main-pr-source` job.
+
+```bash
+# ❌ CI WILL BLOCK - PRs to main from feature branches
+gh pr create --base main --head fix/my-feature  # FAILS in CI
+
+# ✅ CORRECT - Always go through dev first
+gh pr create --base dev --head fix/my-feature   # PR to dev
+# After merge to dev:
+gh pr create --base main --head dev --title "Release"  # dev → main (allowed)
+```
+
+**POSTMORTEM (2026-01-16):** Agent found merge conflicts between dev and main. Instead of resolving conflicts properly (merge main into dev), created a feature branch directly from main and merged fixes to main. This bypassed dev, created divergence, and left dev without the fixes.
+
+**FIX:** Added CI enforcement (`enforce-main-pr-source` job). Now mechanically impossible to merge non-dev branches to main.
 
 ## 🔴 BEHAVIORAL RULES
 
