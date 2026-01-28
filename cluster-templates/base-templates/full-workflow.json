@@ -123,6 +123,12 @@
             "priority": "medium",
             "strategy": "latest",
             "amount": 1
+          },
+          {
+            "topic": "TD_CONTEXT_REFRESH",
+            "priority": "high",
+            "strategy": "latest",
+            "amount": 1
           }
         ],
         "format": "chronological",
@@ -208,6 +214,12 @@
           {
             "topic": "STATE_SNAPSHOT",
             "priority": "required",
+            "strategy": "latest",
+            "amount": 1
+          },
+          {
+            "topic": "TD_CONTEXT_REFRESH",
+            "priority": "high",
             "strategy": "latest",
             "amount": 1
           },

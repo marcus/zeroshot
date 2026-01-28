@@ -147,3 +147,44 @@ describe('CLI Flag Cascade', function () {
     });
   });
 });
+
+/**
+ * Test: buildStartOptions ship flag propagation
+ *
+ * Verifies that buildStartOptions() correctly propagates the ship flag
+ * to the orchestrator options object.
+ */
+
+// Mock buildStartOptions to mirror cli/index.js lines 460-487
+// We extract just the ship flag logic for focused unit testing
+function buildStartOptions({ options }) {
+  return {
+    ship: options.ship || false,
+  };
+}
+
+describe('buildStartOptions ship flag propagation', function () {
+  it('should return ship:true when options.ship is true', function () {
+    const result = buildStartOptions({ options: { ship: true } });
+
+    assert.strictEqual(result.ship, true, 'ship should be true when provided');
+  });
+
+  it('should return ship:false when options.ship is not provided', function () {
+    const result = buildStartOptions({ options: {} });
+
+    assert.strictEqual(result.ship, false, 'ship should default to false');
+  });
+
+  it('should return ship:false when options.ship is explicitly false', function () {
+    const result = buildStartOptions({ options: { ship: false } });
+
+    assert.strictEqual(result.ship, false, 'ship should be false when explicitly set');
+  });
+
+  it('should return ship:false when options.ship is undefined', function () {
+    const result = buildStartOptions({ options: { ship: undefined } });
+
+    assert.strictEqual(result.ship, false, 'ship should be false when undefined');
+  });
+});

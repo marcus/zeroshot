@@ -40,21 +40,41 @@ function registerMountPresetTests() {
       }
     });
 
-    it('should use $HOME placeholder in container paths', function () {
+    it('should use $HOME placeholder in container paths (except project-relative presets)', function () {
+      // Some presets use project-relative paths instead of $HOME
+      const projectRelativePresets = ['td'];
       for (const [name, preset] of Object.entries(MOUNT_PRESETS)) {
-        assert.ok(
-          preset.container.startsWith('$HOME/'),
-          `Preset ${name} should use $HOME placeholder, got: ${preset.container}`
-        );
+        if (projectRelativePresets.includes(name)) {
+          // Project-relative presets use /workspace or similar
+          assert.ok(
+            preset.container.startsWith('/workspace'),
+            `Preset ${name} should use /workspace path, got: ${preset.container}`
+          );
+        } else {
+          assert.ok(
+            preset.container.startsWith('$HOME/'),
+            `Preset ${name} should use $HOME placeholder, got: ${preset.container}`
+          );
+        }
       }
     });
 
-    it('should use ~ in host paths', function () {
+    it('should use ~ in host paths (except project-relative presets)', function () {
+      // Some presets use project-relative paths instead of ~
+      const projectRelativePresets = ['td'];
       for (const [name, preset] of Object.entries(MOUNT_PRESETS)) {
-        assert.ok(
-          preset.host.startsWith('~/'),
-          `Preset ${name} should use ~ for host path, got: ${preset.host}`
-        );
+        if (projectRelativePresets.includes(name)) {
+          // Project-relative presets use ${CWD} or similar
+          assert.ok(
+            preset.host.includes('${CWD}') || preset.host.startsWith('.'),
+            `Preset ${name} should use \${CWD} or relative path, got: ${preset.host}`
+          );
+        } else {
+          assert.ok(
+            preset.host.startsWith('~/'),
+            `Preset ${name} should use ~ for host path, got: ${preset.host}`
+          );
+        }
       }
     });
 
@@ -170,6 +190,26 @@ function registerResolveMountsTests() {
 
     it('should throw on invalid item type', function () {
       assert.throws(() => resolveMounts([123]), /Invalid mount config/);
+    });
+
+    it('should expand ${CWD} in host paths', function () {
+      const result = resolveMounts(['td'], { cwd: '/my/project' });
+      assert.strictEqual(result[0].host, '/my/project/.todos');
+      assert.strictEqual(result[0].container, '/workspace/.todos');
+    });
+
+    it('should default cwd to process.cwd()', function () {
+      const result = resolveMounts(['td']);
+      assert.ok(result[0].host.endsWith('/.todos'));
+      assert.ok(!result[0].host.includes('${CWD}'), 'Should resolve ${CWD} placeholder');
+    });
+
+    it('should expand ${CWD} in custom mount host paths', function () {
+      const result = resolveMounts(
+        [{ host: '${CWD}/data', container: '/workspace/data', readonly: true }],
+        { cwd: '/project/root' }
+      );
+      assert.strictEqual(result[0].host, '/project/root/data');
     });
   });
 }

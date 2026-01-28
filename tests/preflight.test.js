@@ -115,12 +115,20 @@ function defineClaudeAuthTests() {
     });
 
     it('should report unauthenticated when config dir does not exist', () => {
+      // Save and clear env vars that take precedence over credentials file
       const originalDir = process.env.CLAUDE_CONFIG_DIR;
+      const originalApiKey = process.env.ANTHROPIC_API_KEY;
+      const originalBedrock = process.env.AWS_BEARER_TOKEN_BEDROCK;
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.AWS_BEARER_TOKEN_BEDROCK;
       process.env.CLAUDE_CONFIG_DIR = '/nonexistent/path/.claude';
 
       const result = checkClaudeAuth();
 
+      // Restore env vars
       process.env.CLAUDE_CONFIG_DIR = originalDir;
+      if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey;
+      if (originalBedrock) process.env.AWS_BEARER_TOKEN_BEDROCK = originalBedrock;
 
       expect(result.authenticated).to.be.false;
       expect(result.error).to.include('No credentials file found');
@@ -132,12 +140,20 @@ function defineClaudeAuthTests() {
       const credPath = path.join(tmpDir, '.credentials.json');
       fs.writeFileSync(credPath, '{}');
 
+      // Save and clear env vars that take precedence over credentials file
       const originalDir = process.env.CLAUDE_CONFIG_DIR;
+      const originalApiKey = process.env.ANTHROPIC_API_KEY;
+      const originalBedrock = process.env.AWS_BEARER_TOKEN_BEDROCK;
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.AWS_BEARER_TOKEN_BEDROCK;
       process.env.CLAUDE_CONFIG_DIR = tmpDir;
 
       const result = checkClaudeAuth();
 
+      // Restore env vars
       process.env.CLAUDE_CONFIG_DIR = originalDir;
+      if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey;
+      if (originalBedrock) process.env.AWS_BEARER_TOKEN_BEDROCK = originalBedrock;
       fs.rmSync(tmpDir, { recursive: true });
 
       expect(result.authenticated).to.be.false;
@@ -157,12 +173,20 @@ function defineClaudeAuthTests() {
       };
       fs.writeFileSync(credPath, JSON.stringify(expiredCreds));
 
+      // Save and clear env vars that take precedence over credentials file
       const originalDir = process.env.CLAUDE_CONFIG_DIR;
+      const originalApiKey = process.env.ANTHROPIC_API_KEY;
+      const originalBedrock = process.env.AWS_BEARER_TOKEN_BEDROCK;
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.AWS_BEARER_TOKEN_BEDROCK;
       process.env.CLAUDE_CONFIG_DIR = tmpDir;
 
       const result = checkClaudeAuth();
 
+      // Restore env vars
       process.env.CLAUDE_CONFIG_DIR = originalDir;
+      if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey;
+      if (originalBedrock) process.env.AWS_BEARER_TOKEN_BEDROCK = originalBedrock;
       fs.rmSync(tmpDir, { recursive: true });
 
       expect(result.authenticated).to.be.false;
@@ -237,15 +261,21 @@ function defineClaudeAuthTests() {
         this.skip();
       }
 
-      // Must NOT set CLAUDE_CONFIG_DIR for Keychain fallback to activate
+      // Save and clear env vars that take precedence over Keychain
       const originalDir = process.env.CLAUDE_CONFIG_DIR;
+      const originalApiKey = process.env.ANTHROPIC_API_KEY;
+      const originalBedrock = process.env.AWS_BEARER_TOKEN_BEDROCK;
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.AWS_BEARER_TOKEN_BEDROCK;
+      // Must NOT set CLAUDE_CONFIG_DIR for Keychain fallback to activate
       delete process.env.CLAUDE_CONFIG_DIR;
 
       const result = checkClaudeAuth();
 
-      if (originalDir) {
-        process.env.CLAUDE_CONFIG_DIR = originalDir;
-      }
+      // Restore env vars
+      if (originalDir) process.env.CLAUDE_CONFIG_DIR = originalDir;
+      if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey;
+      if (originalBedrock) process.env.AWS_BEARER_TOKEN_BEDROCK = originalBedrock;
 
       expect(result.authenticated).to.be.true;
       expect(result.method).to.equal('keychain');

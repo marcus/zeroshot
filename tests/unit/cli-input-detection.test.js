@@ -2,13 +2,14 @@
  * Test: CLI Input Detection
  *
  * Verifies the input detection logic in cli/index.js
- * Tests: GitHub issue URL, issue number, org/repo#123, markdown files, plain text
+ * Tests: GitHub issue URL, issue number, org/repo#123, markdown files, plain text, TD issues
  */
 
 const assert = require('assert');
+const { detectProvider } = require('../../src/issue-providers');
 
-// Mock the CLI input detection logic
-// This mirrors the logic in cli/index.js lines 497-516
+// Mock the CLI input detection logic (simplified version without provider detection)
+// This mirrors the ORIGINAL logic in cli/index.js for basic tests
 function detectInputType(inputArg) {
   const input = {};
 
@@ -33,6 +34,45 @@ function detectInputType(inputArg) {
     input.text = inputArg;
   }
 
+  return input;
+}
+
+// Full detection logic including provider registry fallback
+// This mirrors the CURRENT logic in cli/index.js with TD support
+function detectInputTypeWithProviders(inputArg, settings = {}) {
+  const input = {};
+
+  const isGitHubUrl = /^https?:\/\/github\.com\/[\w-]+\/[\w-]+\/issues\/\d+/.test(inputArg);
+  const isGitLabUrl = /gitlab\.(com|[\w.-]+)\/[\w-]+\/[\w-]+\/-\/issues\/\d+/.test(inputArg);
+  const isJiraUrl = /(atlassian\.net|jira\.[\w.-]+)\/browse\/[A-Z][A-Z0-9]+-\d+/.test(inputArg);
+  const isAzureUrl =
+    /dev\.azure\.com\/.*\/_workitems\/edit\/\d+/.test(inputArg) ||
+    /visualstudio\.com\/.*\/_workitems\/edit\/\d+/.test(inputArg);
+  const isJiraKey = /^[A-Z][A-Z0-9]+-\d+$/.test(inputArg);
+  const isIssueNumber = /^\d+$/.test(inputArg);
+  const isRepoIssue = /^[\w-]+\/[\w-]+#\d+$/.test(inputArg);
+  const isMarkdownFile = /\.(md|markdown)$/i.test(inputArg);
+
+  if (
+    isGitHubUrl ||
+    isGitLabUrl ||
+    isJiraUrl ||
+    isAzureUrl ||
+    isJiraKey ||
+    isIssueNumber ||
+    isRepoIssue
+  ) {
+    input.issue = inputArg;
+  } else if (isMarkdownFile) {
+    input.file = inputArg;
+  } else {
+    // Check if any registered issue provider can handle this input
+    if (detectProvider(inputArg, settings)) {
+      input.issue = inputArg;
+    } else {
+      input.text = inputArg;
+    }
+  }
   return input;
 }
 
@@ -178,6 +218,66 @@ describe('CLI Input Detection', function () {
       const input = detectInputType('feature.md');
 
       assert.strictEqual(input.file, 'feature.md');
+      assert.strictEqual(input.text, undefined);
+    });
+  });
+
+  describe('TD issue detection (with provider registry)', function () {
+    it('should detect td-XXXXXX format as issue', function () {
+      const input = detectInputTypeWithProviders('td-abc123', {});
+
+      assert.strictEqual(input.issue, 'td-abc123');
+      assert.strictEqual(input.file, undefined);
+      assert.strictEqual(input.text, undefined);
+    });
+
+    it('should detect TD-XXXXXX format (uppercase) as issue', function () {
+      const input = detectInputTypeWithProviders('TD-ABC123', {});
+
+      assert.strictEqual(input.issue, 'TD-ABC123');
+      assert.strictEqual(input.file, undefined);
+      assert.strictEqual(input.text, undefined);
+    });
+
+    it('should detect bare hex as issue when defaultIssueSource is td', function () {
+      const input = detectInputTypeWithProviders('abc123', { defaultIssueSource: 'td' });
+
+      assert.strictEqual(input.issue, 'abc123');
+      assert.strictEqual(input.file, undefined);
+      assert.strictEqual(input.text, undefined);
+    });
+
+    it('should NOT detect bare hex as issue when defaultIssueSource is not td', function () {
+      const input = detectInputTypeWithProviders('abc123', { defaultIssueSource: 'github' });
+
+      assert.strictEqual(input.text, 'abc123');
+      assert.strictEqual(input.issue, undefined);
+      assert.strictEqual(input.file, undefined);
+    });
+
+    it('plain text should remain as text even with provider check', function () {
+      const input = detectInputTypeWithProviders('implement dark mode', {});
+
+      assert.strictEqual(input.text, 'implement dark mode');
+      assert.strictEqual(input.issue, undefined);
+      assert.strictEqual(input.file, undefined);
+    });
+
+    it('GitHub URL should still be detected before provider fallback', function () {
+      const input = detectInputTypeWithProviders('https://github.com/owner/repo/issues/123', {
+        defaultIssueSource: 'td',
+      });
+
+      assert.strictEqual(input.issue, 'https://github.com/owner/repo/issues/123');
+      assert.strictEqual(input.file, undefined);
+      assert.strictEqual(input.text, undefined);
+    });
+
+    it('markdown file should still be detected before provider fallback', function () {
+      const input = detectInputTypeWithProviders('feature.md', { defaultIssueSource: 'td' });
+
+      assert.strictEqual(input.file, 'feature.md');
+      assert.strictEqual(input.issue, undefined);
       assert.strictEqual(input.text, undefined);
     });
   });

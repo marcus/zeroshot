@@ -204,7 +204,7 @@ function normalizeRunOptions(options) {
   }
 }
 
-function detectRunInput(inputArg) {
+function detectRunInput(inputArg, settings = {}) {
   const input = {};
 
   // Check if it looks like an issue URL or key
@@ -232,7 +232,14 @@ function detectRunInput(inputArg) {
   } else if (isMarkdownFile) {
     input.file = inputArg;
   } else {
-    input.text = inputArg;
+    // Check if any registered issue provider can handle this input
+    // This catches TD format (td-XXXXXX) and other provider-specific formats
+    const { detectProvider } = require('../src/issue-providers');
+    if (detectProvider(inputArg, settings)) {
+      input.issue = inputArg;
+    } else {
+      input.text = inputArg;
+    }
   }
   return input;
 }
@@ -276,7 +283,9 @@ function runClusterPreflight({ input, options, providerOverride, settings, force
     quiet: process.env.ZEROSHOT_DAEMON === '1',
     provider: providerOverride,
     issueProvider, // Pass detected issue provider for tool checking
+    issueIdentifier: input.issue, // Pass issue ID for existence validation
     targetHost, // Pass target host for multi-instance auth checks (e.g., GitLab self-hosted)
+    cwd: options.cwd || process.cwd(),
   });
 }
 
@@ -475,6 +484,7 @@ function buildStartOptions({
     autoPr: options.pr || process.env.ZEROSHOT_PR === '1',
     autoMerge: process.env.ZEROSHOT_MERGE === '1',
     autoPush: process.env.ZEROSHOT_PUSH === '1',
+    ship: options.ship || false,
     modelOverride: modelOverride || undefined,
     providerOverride: providerOverride || undefined,
     noMounts: options.noMounts || false,
@@ -2439,9 +2449,9 @@ Force provider flags: -G (GitHub), -L (GitLab), -J (Jira), -D (DevOps)
       else if (options.jira) forceProvider = 'jira';
       else if (options.devops) forceProvider = 'azure-devops';
 
-      // Auto-detect input type
-      const input = detectRunInput(inputArg);
+      // Auto-detect input type (settings needed for provider detection)
       const settings = loadSettings();
+      const input = detectRunInput(inputArg, settings);
       const providerOverride = resolveProviderOverride(options);
 
       // Preflight checks

@@ -5,7 +5,11 @@
  * These wrappers enforce timeouts to prevent infinite hangs.
  */
 
-const { exec: nodeExec, execSync: nodeExecSync } = require('child_process');
+const {
+  exec: nodeExec,
+  execSync: nodeExecSync,
+  spawnSync: nodeSpawnSync,
+} = require('child_process');
 
 /** Default timeout: 30 seconds */
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -85,4 +89,45 @@ function execSync(command, options = {}) {
   return nodeExecSync(command, { ...options, timeout });
 }
 
-module.exports = { exec, execSync, DEFAULT_TIMEOUT_MS };
+/**
+ * Execute command with args (no shell parsing, safer for user input)
+ * Uses spawnSync to avoid shell injection vulnerabilities.
+ *
+ * @param {string} command - The command to execute (e.g., 'td')
+ * @param {string[]} args - Array of arguments (not parsed by shell)
+ * @param {object} [options] - Options (timeout required or uses default)
+ * @returns {{ stdout: string, stderr: string, status: number }}
+ *
+ * @example
+ * // Safely execute with user-provided strings
+ * spawnSync('td', ['handoff', issueId, '--done', userInput]);
+ */
+function spawnSync(command, args = [], options = {}) {
+  const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
+
+  if (timeout <= 0) {
+    throw new Error('spawnSync() timeout must be > 0. Infinite waits are forbidden.');
+  }
+
+  const result = nodeSpawnSync(command, args, {
+    ...options,
+    timeout,
+    shell: false, // Critical: no shell parsing
+    encoding: options.encoding || 'utf8',
+  });
+
+  if (result.error) {
+    if (result.error.code === 'ETIMEDOUT') {
+      result.error.message = `Command timed out after ${timeout}ms: ${command} ${args.join(' ')}`;
+    }
+    throw result.error;
+  }
+
+  return {
+    stdout: result.stdout,
+    stderr: result.stderr,
+    status: result.status,
+  };
+}
+
+module.exports = { exec, execSync, spawnSync, DEFAULT_TIMEOUT_MS };

@@ -91,6 +91,12 @@
             "amount": 1
           },
           {
+            "topic": "TD_CONTEXT_REFRESH",
+            "priority": "high",
+            "strategy": "latest",
+            "amount": 1
+          },
+          {
             "topic": "WORKER_PROGRESS",
             "priority": "medium",
             "since": "last_task_end",

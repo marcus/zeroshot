@@ -532,6 +532,21 @@ function runPreflight(options = {}) {
             )
           );
         }
+
+        // Validate issue exists (if provider supports it and we have an identifier)
+        if (authResult.authenticated && options.issueIdentifier && ProviderClass.validateIssue) {
+          const cwd = options.cwd || process.cwd();
+          const issueResult = ProviderClass.validateIssue(options.issueIdentifier, cwd);
+          if (!issueResult.valid) {
+            errors.push(
+              formatError(
+                `${ProviderClass.displayName} issue not accessible`,
+                issueResult.error,
+                issueResult.recovery
+              )
+            );
+          }
+        }
       }
     }
   }

@@ -1388,11 +1388,26 @@ class IsolationManager {
       }
     }
 
+    // Create .td-root for TD database access if main repo has TD initialized
+    if (this._hasTdDatabase(repoRoot)) {
+      const tdRootPath = path.join(worktreePath, '.td-root');
+      fs.writeFileSync(tdRootPath, repoRoot);
+      console.log(`[IsolationManager] Created .td-root for TD database access`);
+    }
+
     return {
       path: worktreePath,
       branch: branchName,
       repoRoot,
     };
+  }
+
+  /**
+   * Check if directory has TD initialized
+   * @private
+   */
+  _hasTdDatabase(dir) {
+    return fs.existsSync(path.join(dir, '.todos', 'issues.db'));
   }
 
   /**

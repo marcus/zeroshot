@@ -685,6 +685,11 @@ function buildSpawnEnv(agent, providerName, modelSpec) {
     }
   }
 
+  // TD SESSION: Inject session ID for TD logging/context
+  if (agent.config?.tdSession) {
+    spawnEnv.TD_SESSION = agent.config.tdSession;
+  }
+
   return spawnEnv;
 }
 

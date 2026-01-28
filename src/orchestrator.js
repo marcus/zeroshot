@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const lockfile = require('proper-lockfile');
+const { execSync } = require('./lib/safe-exec');
 
 // Stale lock timeout in ms - if lock file is older than this, delete it
 const LOCK_STALE_MS = 5000;
@@ -677,6 +678,7 @@ class Orchestrator {
       isolationImage: options.isolationImage,
       worktree: options.worktree || false,
       autoPr: options.autoPr || process.env.ZEROSHOT_PR === '1',
+      ship: options.ship || false,
       modelOverride: options.modelOverride, // Model override for all agents
       clusterId: options.clusterId, // Explicit ID from CLI/daemon parent
       settings: options.settings, // User settings for issue provider detection
@@ -733,6 +735,8 @@ class Orchestrator {
       initCompletePromise,
       _resolveInitComplete: resolveInitComplete,
       autoPr: options.autoPr || false,
+      // Ship mode: auto-merge PRs and close TD issues
+      ship: options.ship || false,
       // Model override for all agents (applied to dynamically added agents)
       modelOverride: options.modelOverride || null,
       // Issue provider tracking (where issue was fetched from)
@@ -786,6 +790,39 @@ class Orchestrator {
         // Store issue provider for logging/debugging and cross-provider workflows
         cluster.issueProvider = ProviderClass.id;
 
+        // TD lifecycle: auto-start issue and create sessions for agents
+        if (ProviderClass.id === 'td') {
+          const issueId = inputData.tdMetadata?.id;
+          if (issueId) {
+            try {
+              const cwd = cluster.cwd || process.cwd();
+              execSync(`td start ${issueId}`, { cwd, encoding: 'utf8', stdio: 'pipe' });
+              this._log(`[TD] Started issue ${issueId}`);
+            } catch {
+              // Non-fatal: issue might already be started
+              this._log(`[TD] Note: Could not start issue (may already be in progress)`);
+            }
+
+            // Create TD sessions for each agent
+            try {
+              const TDSessionManager = require('./td/session-manager');
+              const cwd = cluster.cwd || process.cwd();
+              cluster.tdSessionManager = new TDSessionManager({ cwd });
+
+              for (const agentConfig of config.agents || []) {
+                const sessionId = cluster.tdSessionManager.createSession(agentConfig.id, clusterId);
+                if (sessionId) {
+                  agentConfig.tdSession = sessionId;
+                  this._log(`[TD] Created session ${sessionId} for ${agentConfig.id}`);
+                }
+              }
+            } catch {
+              // Non-fatal: session creation is optional enhancement
+              this._log(`[TD] Note: Could not create agent sessions`);
+            }
+          }
+        }
+
         // Log clickable issue link
         if (inputData.url) {
           this._log(`[Orchestrator] Issue (${ProviderClass.displayName}): ${inputData.url}`);
@@ -798,6 +835,9 @@ class Orchestrator {
       } else {
         throw new Error('Either issue, file, or text input is required');
       }
+
+      // Store inputData on cluster for later access (e.g., TD handoff)
+      cluster.inputData = inputData;
 
       // Detect git platform for --pr mode (independent of issue provider)
       if (options.autoPr) {
@@ -993,9 +1033,60 @@ class Orchestrator {
       this._log(`Initiated by: ${message.sender}`);
       this._log(`${'='.repeat(80)}\n`);
 
+      // TD lifecycle: auto-handoff on successful completion using HandoffExtractor
+      const cluster = this.clusters.get(clusterId);
+      if (cluster?.issueProvider === 'td' && cluster.inputData?.tdMetadata?.id) {
+        this._captureTDHandoff(clusterId, cluster, messageBus);
+      }
+
       this.stop(clusterId).catch((err) => {
         console.error(`Failed to auto-stop cluster ${clusterId}:`, err.message);
       });
+    });
+
+    // TD lifecycle: auto-review and PR URL logging when PR is created (--pr/--ship modes)
+    this._subscribeToClusterTopic(messageBus, clusterId, 'PR_CREATED', (message) => {
+      const cluster = this.clusters.get(clusterId);
+      if (cluster?.issueProvider === 'td' && cluster.inputData?.tdMetadata?.id) {
+        const issueId = cluster.inputData.tdMetadata.id;
+        const cwd = cluster.cwd || process.cwd();
+
+        // Log PR/MR URL to TD issue
+        const prUrl = message.content?.data?.pr_url || message.content?.data?.mr_url;
+        if (prUrl) {
+          try {
+            execSync(`td log ${issueId} "PR: ${prUrl}"`, {
+              cwd,
+              encoding: 'utf8',
+              stdio: 'pipe',
+              timeout: 5000,
+            });
+            this._log(`[TD] Linked PR to issue: ${prUrl}`);
+          } catch {
+            this._log(`[TD] Warning: Could not log PR URL`);
+          }
+        }
+
+        // Check if --ship mode (auto-merge enabled)
+        const isShipMode = cluster.ship || message.content?.data?.merged;
+        if (isShipMode) {
+          // --ship mode: close TD issue (PR auto-merged or will auto-merge)
+          try {
+            execSync(`td close ${issueId}`, { cwd, encoding: 'utf8', stdio: 'pipe' });
+            this._log(`[TD] Closed issue ${issueId} (ship mode)`);
+          } catch {
+            this._log(`[TD] Warning: Could not close issue`);
+          }
+        } else {
+          // --pr mode: submit for review
+          try {
+            execSync(`td review ${issueId}`, { cwd, encoding: 'utf8', stdio: 'pipe' });
+            this._log(`[TD] Submitted ${issueId} for review`);
+          } catch {
+            this._log(`[TD] Warning: Could not submit for review`);
+          }
+        }
+      }
     });
 
     this._subscribeToClusterTopic(messageBus, clusterId, 'CLUSTER_FAILED', (message) => {
@@ -1313,11 +1404,20 @@ class Orchestrator {
     const gitPusherConfig = generateGitPusherAgent(platform);
 
     // Template replacement for issue context
-    const issueRef = skipCloseIssue ? '' : `Closes #${inputData.number || 'unknown'}`;
-    gitPusherConfig.prompt = gitPusherConfig.prompt
-      .replace(/\{\{issue_number\}\}/g, inputData.number || 'unknown')
-      .replace(/\{\{issue_title\}\}/g, inputData.title || 'Implementation')
-      .replace(/Closes #\{\{issue_number\}\}/g, issueRef);
+    // TD issues use different format (no 'Closes #X' - TD IDs aren't GitHub issue numbers)
+    if (inputData.tdMetadata) {
+      const tdId = inputData.tdMetadata.id;
+      gitPusherConfig.prompt = gitPusherConfig.prompt
+        .replace(/\{\{issue_number\}\}/g, tdId)
+        .replace(/\{\{issue_title\}\}/g, inputData.title || 'Implementation')
+        .replace(/Closes #\{\{issue_number\}\}/g, `TD: ${tdId}`);
+    } else {
+      const issueRef = skipCloseIssue ? '' : `Closes #${inputData.number || 'unknown'}`;
+      gitPusherConfig.prompt = gitPusherConfig.prompt
+        .replace(/\{\{issue_number\}\}/g, inputData.number || 'unknown')
+        .replace(/\{\{issue_title\}\}/g, inputData.title || 'Implementation')
+        .replace(/Closes #\{\{issue_number\}\}/g, issueRef);
+    }
 
     config.agents.push(gitPusherConfig);
     this._log(
@@ -1599,6 +1699,9 @@ class Orchestrator {
     this._startSnapshotter(cluster);
     await this._restartClusterAgents(cluster);
 
+    // Inject fresh TD context on resume
+    this._injectTDContextOnResume(clusterId, cluster);
+
     const recentMessages = this._loadRecentMessages(cluster, clusterId, 50);
 
     if (failureInfo) {
@@ -1731,6 +1834,97 @@ class Orchestrator {
         order: 'desc',
       })
       .reverse();
+  }
+
+  /**
+   * Inject fresh TD context when resuming a cluster
+   * Publishes TD_CONTEXT_REFRESH message with current issue state
+   */
+  _injectTDContextOnResume(clusterId, cluster) {
+    if (cluster.issueProvider !== 'td') return;
+
+    const issueId = cluster.inputData?.tdMetadata?.id;
+    if (!issueId) return;
+
+    try {
+      const cwd = cluster.cwd || process.cwd();
+      const tdContext = execSync(`td context ${issueId}`, {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 5000,
+      });
+
+      cluster.messageBus.publish({
+        cluster_id: clusterId,
+        topic: 'TD_CONTEXT_REFRESH',
+        sender: 'system',
+        content: {
+          text: tdContext,
+          data: { issueId },
+        },
+      });
+
+      this._log(`[TD] Injected fresh context for ${issueId}`);
+    } catch {
+      // Non-fatal: context refresh is optional enhancement
+      this._log(`[TD] Note: Could not refresh context for ${issueId}`);
+    }
+  }
+
+  /**
+   * Capture TD handoff using HandoffExtractor for structured data
+   * Extracts done/remaining/decisions from cluster messages
+   */
+  _captureTDHandoff(clusterId, cluster, messageBus) {
+    const issueId = cluster.inputData.tdMetadata.id;
+    const cwd = cluster.cwd || process.cwd();
+
+    try {
+      const {
+        extractHandoffData,
+        buildHandoffCommand,
+        hasContent,
+      } = require('./td/handoff-extractor');
+
+      // Query all messages from this cluster
+      const messages = messageBus.query({
+        cluster_id: clusterId,
+        limit: 100,
+        order: 'asc',
+      });
+
+      // Extract structured handoff data
+      const handoffData = extractHandoffData(messages);
+
+      // Use require inline to allow test mocking (destructured import is cached)
+      const safeExec = require('./lib/safe-exec');
+
+      if (hasContent(handoffData)) {
+        // Use structured handoff command (spawnSync for shell injection safety)
+        const { command, args } = buildHandoffCommand(issueId, handoffData);
+        this._log(`[TD] Handoff: ${command} ${args.slice(0, 5).join(' ')}...`);
+        safeExec.spawnSync(command, args, { cwd, stdio: 'pipe', timeout: 10000 });
+        this._log(`[TD] Structured handoff captured for ${issueId}`);
+      } else {
+        // Fallback to simple handoff if no structured data (spawnSync for safety)
+        safeExec.spawnSync(
+          'td',
+          [
+            'handoff',
+            issueId,
+            '--done',
+            'Implementation completed by ZeroShot cluster',
+            '--remaining',
+            'Review and merge',
+          ],
+          { cwd, stdio: 'pipe', timeout: 10000 }
+        );
+        this._log(`[TD] Basic handoff captured for ${issueId}`);
+      }
+    } catch (err) {
+      this._log(`[TD] Warning: Could not capture handoff - ${err.message}`);
+    }
   }
 
   _buildResumeContext(recentMessages, prompt, options) {

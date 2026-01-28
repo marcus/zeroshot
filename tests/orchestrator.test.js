@@ -1026,3 +1026,242 @@ describe('Orchestrator - Edge Cases', function () {
     // No assertion needed - just verify it doesn't throw
   });
 });
+
+/**
+ * TD Handoff Timeout Tests
+ *
+ * Tests verify that _captureTDHandoff passes timeout:10000 to spawnSync.
+ * Uses source code inspection approach since module caching prevents runtime mocking.
+ *
+ * WHY SOURCE INSPECTION:
+ * The orchestrator module imports spawnSync at require time, before tests can mock it.
+ * Rather than complex dependency injection, we verify the timeout values directly in source.
+ * This catches regressions if someone changes timeout from 10000 to something else.
+ */
+describe('Orchestrator - TD Handoff Timeout (_captureTDHandoff)', function () {
+  let methodSource;
+
+  before(function () {
+    // Read the orchestrator source once and extract _captureTDHandoff method
+    const orchestratorSource = fs.readFileSync(
+      path.join(__dirname, '../src/orchestrator.js'),
+      'utf8'
+    );
+
+    // Extract the _captureTDHandoff method (from declaration to next method)
+    // Use ' {' suffix to match definition, not call sites
+    const methodStart = orchestratorSource.indexOf(
+      '_captureTDHandoff(clusterId, cluster, messageBus) {'
+    );
+    assert.ok(methodStart > -1, '_captureTDHandoff method should exist in orchestrator.js');
+
+    // Find the end of the method (next method declaration starting with underscore)
+    const afterMethod = orchestratorSource.slice(methodStart);
+    // Look for next method: "  _methodName(" at start of line
+    const nextMethodMatch = afterMethod.match(/\n {2}_[a-zA-Z]+\(/);
+    const methodEnd = nextMethodMatch ? nextMethodMatch.index : 2000;
+
+    methodSource = afterMethod.slice(0, methodEnd);
+
+    // Debug: uncomment to see extracted source
+    // console.log('Extracted method source:', methodSource.slice(0, 500));
+  });
+
+  it('should have timeout:10000 for structured handoff path', function () {
+    // The structured handoff path has: safeExec.spawnSync(command, args, { cwd, stdio: 'pipe', timeout: 10000 });
+    assert.ok(
+      methodSource.includes(
+        "safeExec.spawnSync(command, args, { cwd, stdio: 'pipe', timeout: 10000 })"
+      ),
+      'Structured handoff spawnSync should have timeout: 10000'
+    );
+  });
+
+  it('should have timeout:10000 for fallback simple handoff path', function () {
+    // The fallback path has: { cwd, stdio: 'pipe', timeout: 10000 }
+    // Count occurrences of timeout: 10000 - should be exactly 2
+    const timeoutMatches = methodSource.match(/timeout:\s*10000/g);
+    assert.ok(timeoutMatches, 'Should have timeout: 10000 in method');
+    assert.strictEqual(
+      timeoutMatches.length,
+      2,
+      'Both spawnSync calls (structured + fallback) should have timeout: 10000'
+    );
+  });
+
+  it('should use 10000ms timeout not DEFAULT_TIMEOUT_MS (30000)', function () {
+    // Verify explicitly using 10000, not relying on DEFAULT_TIMEOUT_MS constant
+    // This is important because TD handoff should be quick (~10s), not 30s default
+    assert.ok(
+      !methodSource.includes('DEFAULT_TIMEOUT_MS'),
+      'Should use explicit 10000, not DEFAULT_TIMEOUT_MS constant'
+    );
+    assert.ok(methodSource.includes('timeout: 10000'), 'Should have explicit timeout: 10000');
+  });
+
+  it('should handle errors gracefully with try-catch', function () {
+    // Verify the spawnSync calls are wrapped in try-catch
+    assert.ok(methodSource.includes('try {'), '_captureTDHandoff should have try block');
+    assert.ok(methodSource.includes('catch (err)'), '_captureTDHandoff should have catch block');
+
+    // Verify error is logged, not re-thrown (non-fatal)
+    assert.ok(
+      methodSource.includes('Could not capture handoff'),
+      'Error message should indicate handoff capture failure'
+    );
+  });
+
+  it('should use spawnSync not execSync for shell injection safety', function () {
+    // Verify using spawnSync (no shell parsing) not execSync (shell parsing)
+    // Uses safeExec.spawnSync for testability
+    const spawnSyncCount = (methodSource.match(/safeExec\.spawnSync\(/g) || []).length;
+    const execSyncCount = (methodSource.match(/execSync\(/g) || []).length;
+
+    assert.ok(spawnSyncCount >= 2, 'Should use safeExec.spawnSync at least twice');
+    assert.strictEqual(execSyncCount, 0, 'Should not use execSync (shell injection risk)');
+  });
+});
+
+/**
+ * TD Handoff Runtime Behavior Tests
+ *
+ * Tests verify actual runtime behavior using mocking.
+ * The orchestrator uses inline require('./lib/safe-exec') in _captureTDHandoff,
+ * enabling runtime mocking of safeExec.spawnSync.
+ */
+describe('Orchestrator - TD Handoff Runtime (_captureTDHandoff)', function () {
+  this.timeout(10000);
+
+  let orchestrator, mockRunner, storageDir;
+  let originalSpawnSync;
+  let spawnSyncCalls = [];
+
+  beforeEach(function () {
+    mockRunner = new MockTaskRunner();
+    storageDir = createTempDir();
+    spawnSyncCalls = [];
+
+    // Mock spawnSync on the safe-exec module (inline require allows this)
+    const safeExec = require('../src/lib/safe-exec');
+    originalSpawnSync = safeExec.spawnSync;
+    safeExec.spawnSync = function (command, args, options) {
+      spawnSyncCalls.push({ command, args, options });
+      return { stdout: '', stderr: '', status: 0 };
+    };
+
+    orchestrator = new Orchestrator({
+      taskRunner: mockRunner,
+      storageDir,
+      skipLoad: true,
+      quiet: true,
+    });
+  });
+
+  afterEach(async function () {
+    // Restore original spawnSync
+    const safeExec = require('../src/lib/safe-exec');
+    safeExec.spawnSync = originalSpawnSync;
+
+    if (orchestrator) {
+      orchestrator.close();
+    }
+    // Small delay before cleanup to handle async file operations
+    await sleep(50);
+    cleanupTempDir(storageDir);
+  });
+
+  it('should pass timeout:10000 to spawnSync for structured handoff at runtime', async function () {
+    const config = createSimpleConfig();
+    mockRunner.when('worker').returns({ done: true });
+
+    const result = await orchestrator._startInternal(config, { text: 'Task' }, { testMode: true });
+    const clusterId = result.id;
+    const cluster = orchestrator.getCluster(clusterId);
+
+    // Manually set inputData (simulating TD provider)
+    cluster.inputData = { tdMetadata: { id: 'td-test123' } };
+
+    // Publish messages that will produce structured handoff data
+    cluster.messageBus.publish({
+      cluster_id: clusterId,
+      topic: 'TASK_COMPLETE',
+      sender: 'worker',
+      content: {
+        data: {
+          done: ['Implemented feature X', 'Added tests'],
+          remaining: ['Review PR', 'Deploy'],
+          decisions: ['Used pattern A'],
+        },
+      },
+    });
+
+    // Call _captureTDHandoff directly
+    orchestrator._captureTDHandoff(clusterId, cluster, cluster.messageBus);
+
+    // Verify: spawnSync was called with timeout:10000
+    const tdHandoffCall = spawnSyncCalls.find(
+      (call) => call.command === 'td' && call.args[0] === 'handoff'
+    );
+    assert.ok(tdHandoffCall, 'spawnSync should be called for td handoff');
+    assert.strictEqual(
+      tdHandoffCall.options.timeout,
+      10000,
+      'timeout should be 10000ms for structured handoff'
+    );
+  });
+
+  it('should pass timeout:10000 to spawnSync for fallback simple handoff at runtime', async function () {
+    const config = createSimpleConfig();
+    mockRunner.when('worker').returns({ done: true });
+
+    const result = await orchestrator._startInternal(config, { text: 'Task' }, { testMode: true });
+    const clusterId = result.id;
+    const cluster = orchestrator.getCluster(clusterId);
+
+    // Manually set inputData (simulating TD provider)
+    cluster.inputData = { tdMetadata: { id: 'td-fallback456' } };
+
+    // Don't publish any messages with handoff data - triggers fallback path
+
+    // Call _captureTDHandoff directly
+    orchestrator._captureTDHandoff(clusterId, cluster, cluster.messageBus);
+
+    // Verify: spawnSync was called with timeout:10000
+    const tdHandoffCall = spawnSyncCalls.find(
+      (call) => call.command === 'td' && call.args[0] === 'handoff'
+    );
+    assert.ok(tdHandoffCall, 'spawnSync should be called for td handoff fallback');
+    assert.strictEqual(
+      tdHandoffCall.options.timeout,
+      10000,
+      'timeout should be 10000ms for fallback handoff'
+    );
+    assert.ok(tdHandoffCall.args.includes('--done'), 'fallback handoff should include --done flag');
+  });
+
+  it('should not crash on spawnSync timeout error', async function () {
+    // Override mock to simulate timeout
+    const safeExec = require('../src/lib/safe-exec');
+    safeExec.spawnSync = function () {
+      const error = new Error('Command timed out after 10000ms');
+      error.code = 'ETIMEDOUT';
+      throw error;
+    };
+
+    const config = createSimpleConfig();
+    mockRunner.when('worker').returns({ done: true });
+
+    const result = await orchestrator._startInternal(config, { text: 'Task' }, { testMode: true });
+    const clusterId = result.id;
+    const cluster = orchestrator.getCluster(clusterId);
+
+    cluster.inputData = { tdMetadata: { id: 'td-timeout789' } };
+
+    // Should not throw - gracefully handle timeout
+    assert.doesNotThrow(() => {
+      orchestrator._captureTDHandoff(clusterId, cluster, cluster.messageBus);
+    }, 'should handle spawnSync timeout gracefully');
+
+    assert.ok(cluster, 'cluster should still exist after timeout');
+  });
+});

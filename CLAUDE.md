@@ -1,3 +1,6 @@
+You must run td usage --new-session at conversation start (or after /clear) to see current work.
+Use td usage -q for subsequent reads.
+
 UPDATE THIS FILE when making architectural changes, adding patterns, or changing conventions.
 
 # Zeroshot: Multi-Agent Coordination Engine
